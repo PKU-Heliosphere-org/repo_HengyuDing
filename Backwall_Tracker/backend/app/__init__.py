@@ -1,2 +1,0 @@
-"""Backwall Tracker backend application."""
-
