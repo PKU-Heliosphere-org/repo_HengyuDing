@@ -1,0 +1,34 @@
+# Local reference assets and Codex working documents
+/codex/
+**/.codex/
+**/.agents/
+**/AGENTS.md
+
+# Editor configuration and Python virtual environments
+**/.vscode/
+**/.venv/
+**/venv/
+**/env/
+
+# Caches and generated Python files
+**/.cache/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/*.egg-info/
+*.py[cod]
+
+# Frontend dependencies, build output and test artifacts
+frontend/node_modules/
+frontend/.npm-cache/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+**/*.tsbuildinfo
+
+# Local generated output
+exports/
+data/cache/
+*.log
+*.pid
