@@ -1,0 +1,295 @@
+.main-area {
+  position: relative;
+}
+.view-tools select {
+  width: 90px;
+  font-size: 10px;
+  padding: 5px 6px;
+  background: #14202d;
+  border-color: #2e3c49;
+  color: #94a9b8;
+}
+.view-tools {
+  max-width: calc(100% - 290px);
+}
+.scene-host canvas {
+  touch-action: none;
+  cursor: grab;
+}
+.scene-host canvas:active {
+  cursor: grabbing;
+}
+.view-corner,
+.scene-readout,
+.scene-legend,
+.scene-bottom-note,
+.scene-scale {
+  pointer-events: none;
+}
+.scene-legend {
+  max-height: calc(100% - 140px);
+  overflow: hidden;
+}
+.ephemeris-banner {
+  position: absolute;
+  left: 50%;
+  bottom: 205px;
+  transform: translateX(-50%);
+  z-index: 4;
+  padding: 8px 14px;
+  border: 1px solid #4d746659;
+  border-radius: 5px;
+  background: #152b2be6;
+  color: #95c4b6;
+  font-size: 10px;
+  max-width: 80%;
+  box-shadow: 0 4px 30px #0003;
+}
+.ephemeris-banner.failed {
+  color: #e1b278;
+  border-color: #a685554d;
+  background: #30281eeb;
+}
+.planet-dialog {
+  width: 720px;
+  max-height: calc(100dvh - 48px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #3b4a59;
+  background: #17202b;
+  border-radius: 10px;
+  box-shadow: 0 30px 100px #0007;
+}
+.planet-dialog > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 23px 27px;
+  border-bottom: 1px solid #2c3947;
+}
+.planet-dialog h2 {
+  font-size: 19px;
+  font-weight: 450;
+  letter-spacing: 1px;
+  margin-top: 7px;
+  color: #d9e4ed;
+}
+.planet-dialog > footer {
+  border-top: 1px solid #2c3947;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 17px 25px;
+  gap: 15px;
+}
+.planet-dialog > footer > span {
+  font-size: 10px;
+  color: #698293;
+}
+.planet-picker {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 20px 0 24px;
+}
+.planet-picker > button {
+  min-height: 75px;
+  border: 1px solid #30404f;
+  justify-content: flex-start;
+  gap: 15px;
+  background: #141e29;
+  padding: 11px 15px;
+}
+.planet-picker > button.chosen {
+  border-color: #83b5a782;
+  background: #213b363d;
+}
+.planet-mini {
+  width: 42px;
+  height: 42px;
+  display: block;
+  flex-shrink: 0;
+  background-size: auto 100%;
+  background-position: 50% 50%;
+  border-radius: 50%;
+  position: relative;
+  box-shadow: inset -7px -1px 12px #0008;
+}
+.planet-mini:after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: linear-gradient(110deg, transparent 10%, #0003 60%, #000b);
+}
+.planet-picker > button > span:nth-child(2) {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  align-items: flex-start;
+  flex: 1;
+}
+.planet-picker strong {
+  font-size: 12px;
+  font-weight: 450;
+  color: #c7d8e0;
+  letter-spacing: 1px;
+}
+.planet-picker small {
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  color: #647f91;
+}
+.planet-picker svg,
+.picker-plus {
+  color: #93c9b5;
+}
+.picker-plus {
+  font-size: 18px;
+  font-weight: 200;
+}
+.planet-dialog .form-grid label {
+  font-size: 10px;
+  color: #849bb0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.planet-view-actions {
+  display: flex;
+  gap: 7px;
+  margin-top: 18px;
+}
+.planet-view-actions > button {
+  flex: 1;
+  font-size: 10px;
+  padding: 8px 7px;
+  white-space: nowrap;
+}
+.planet-view-actions .following {
+  background: #31534466;
+  border-color: #6ca68f75;
+  color: #b6d7c8;
+}
+.planet-type {
+  color: #6c8b94;
+  font-family: monospace;
+  font-size: 9px;
+  letter-spacing: 1px;
+}
+.planet-inspector .properties-heading {
+  display: flex;
+}
+.planet-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 18px 0 25px;
+}
+.planet-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: #91a5b6;
+}
+.earth-quality {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 18px;
+  font-size: 10px;
+  color: #91b9a6;
+}
+.earth-quality i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #8db79b;
+}
+.earth-quality.approximate {
+  color: #d4b77f;
+}
+.earth-quality.approximate i {
+  background: #caa667;
+}
+.planet-track > span {
+  opacity: 0.22;
+}
+.timeline-tracks {
+  max-height: 94px;
+  overflow: hidden;
+}
+.timeline-options {
+  flex-shrink: 0;
+}
+.planet-inspector .property-body > .hint {
+  font-size: 10px;
+}
+.scene-labels {
+  z-index: 1;
+}
+.webgl-error {
+  z-index: 5;
+}
+@media (max-width: 1300px) {
+  .toolbar {
+    padding: 0 12px;
+  }
+  .toolbar-group {
+    gap: 5px;
+  }
+  .toolbar-group .compact {
+    padding: 7px 9px;
+  }
+  .view-tools {
+    gap: 1px;
+    right: 14px;
+  }
+  .view-tools .tool {
+    width: 27px;
+  }
+  .view-tools select {
+    width: 83px;
+  }
+  .planet-view-actions {
+    gap: 5px;
+  }
+  .planet-view-actions > button {
+    font-size: 9px;
+  }
+  .scene-legend {
+    top: 89px;
+  }
+  .planet-picker {
+    gap: 8px;
+  }
+  .scene-bottom-note {
+    font-size: 8px;
+  }
+}
+@media (max-height: 780px) {
+  .ephemeris-banner {
+    bottom: 180px;
+  }
+  .planet-dialog > header {
+    padding: 16px 24px;
+  }
+  .planet-dialog .dialog-body {
+    padding: 16px 24px;
+  }
+  .planet-picker > button {
+    min-height: 59px;
+    padding: 8px 12px;
+  }
+  .planet-mini {
+    width: 35px;
+    height: 35px;
+  }
+  .planet-picker {
+    margin: 16px 0;
+  }
+  .planet-dialog > footer {
+    padding: 12px 24px;
+  }
+}

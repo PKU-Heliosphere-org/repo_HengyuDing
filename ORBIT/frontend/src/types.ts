@@ -97,8 +97,10 @@ export type Hypothesis = {
 };
 export type Layer = {
   id: string;
-  dataset_id: string;
-  kind: "dataset" | "hypothesis";
+  dataset_id?: string;
+  kind: "dataset" | "hypothesis" | "planet";
+  body_id?: BodyId;
+  showMeridian?: boolean;
   name: string;
   color: string;
   visible: boolean;
@@ -151,4 +153,78 @@ export type ProjectState = {
   grid: boolean;
   radius_km: number;
   trail_s: number;
+  scene?: SceneSystem;
+  camera?: CameraState;
+  stars?: boolean;
+};
+
+export type BodyId =
+  | "mercury"
+  | "venus"
+  | "earth"
+  | "mars"
+  | "jupiter"
+  | "saturn"
+  | "uranus"
+  | "neptune";
+export type SceneSystem = {
+  center: "sun" | "earth";
+  frame: "J2000" | "ECLIPJ2000";
+};
+export type CameraState = {
+  position_km: Vec3;
+  target_km: Vec3;
+  up: Vec3;
+  follow_id: string | null;
+};
+export type PlanetInfo = {
+  id: BodyId;
+  name: string;
+  color: string;
+  radii_km: Vec3;
+  texture: string;
+  position_reference: "planet_center" | "system_barycenter";
+};
+export type PlanetCatalog = {
+  ready: boolean;
+  ephemeris: string;
+  min_utc: string;
+  max_utc: string;
+  bodies: PlanetInfo[];
+};
+export type QuaternionArray = [number, number, number, number];
+export type OrientationQuality =
+  "observed" | "predicted" | "approximate" | "iau_nominal";
+export type PlanetWindow = {
+  reference_tai: string;
+  times: number[];
+  center: SceneSystem["center"];
+  frame: SceneSystem["frame"];
+  bodies: Partial<
+    Record<
+      BodyId,
+      {
+        positions_km: Vec3[];
+        velocities_km_s: Vec3[];
+        quaternions: QuaternionArray[];
+        radii_km: Vec3;
+        orientation_quality: OrientationQuality[];
+      }
+    >
+  >;
+  sun_positions_km: Vec3[];
+  sun_velocities_km_s: Vec3[];
+  warnings: string[];
+  ephemeris: string;
+};
+export type PlanetState = {
+  position: Vec3;
+  velocity: Vec3;
+  quaternion: QuaternionArray;
+  radii: Vec3;
+  quality: OrientationQuality;
+};
+export type PlanetSnapshot = {
+  bodies: Partial<Record<BodyId, PlanetState>>;
+  sun: Vec3;
 };

@@ -11,6 +11,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Installing Python dependencies failed.' }
     & $pythonExe -m pip install --no-deps -e backend
     if ($LASTEXITCODE -ne 0) { throw 'Installing the ORBIT package failed.' }
+    & $pythonExe scripts/fetch_ephemeris.py
+    if ($LASTEXITCODE -ne 0) { throw 'Preparing the local planetary ephemeris failed.' }
     Push-Location (Join-Path $projectRoot 'frontend')
     try {
         & npm ci

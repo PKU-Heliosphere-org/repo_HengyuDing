@@ -3,7 +3,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 process.env.PLAYWRIGHT_BROWSERS_PATH = path.resolve("../.cache/ms-playwright");
 const { chromium } = await import("@playwright/test");
-const origin = "http://127.0.0.1:8765";
+const origin = process.env.ORBIT_TEST_URL || "http://127.0.0.1:8765";
 const hardware = process.argv.includes("--hardware");
 async function json(url, options = {}) {
   const r = await fetch(origin + "/api/v1" + url, options);

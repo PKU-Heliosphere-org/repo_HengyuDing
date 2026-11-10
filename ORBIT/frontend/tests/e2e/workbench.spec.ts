@@ -61,7 +61,7 @@ test("sample import, explicit conflict, playback, hypothesis and portable projec
   const projectPath = path.resolve("test-results/roundtrip.orbit.json");
   await saved.saveAs(projectPath);
   const content = JSON.parse(await fs.readFile(projectPath, "utf8"));
-  expect(content.schema_version).toBe(1);
+  expect(content.schema_version).toBe(2);
   expect(content.state.layers).toHaveLength(2);
   page.on("dialog", (d) => d.accept());
   await page.getByRole("button", { name: "新建工作台" }).click();

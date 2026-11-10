@@ -11,6 +11,9 @@ import {
   FilePlus2,
   FolderOpen,
   Grid3X3,
+  Globe2,
+  Move3D,
+  RotateCw,
   Layers3,
   Loader2,
   Pause,
@@ -28,6 +31,10 @@ import {
 } from "lucide-react";
 import { api, download, post } from "./api";
 import { ImportDialog } from "./ImportDialog";
+import { PlanetDialog } from "./PlanetDialog";
+import { PlanetInspector } from "./PlanetInspector";
+import { usePlanetWindow } from "./usePlanetWindow";
+import { planetSnapshot } from "./planetMath";
 import { OrbitScene } from "./Scene";
 import type { SceneHandle } from "./Scene";
 import {
@@ -37,7 +44,7 @@ import {
   utcInputSeconds,
   utcLabel,
 } from "./time";
-import { elementFields, titles } from "./types";
+import { defaultMetadata, elementFields, titles } from "./types";
 import type {
   Curve,
   Dataset,
@@ -46,6 +53,10 @@ import type {
   Layer,
   Leap,
   ProjectState,
+  BodyId,
+  CameraState,
+  PlanetCatalog,
+  SceneSystem,
 } from "./types";
 
 const PALETTE = ["#69caca", "#eebf78", "#9d9be9", "#e88eaa", "#8cbd87"];
@@ -114,6 +125,41 @@ export default function App() {
   const [conicEpoch, setConicEpoch] = useState("");
   const [help, setHelp] = useState(false);
   const [showParams, setShowParams] = useState(true);
+  const [system, setSystem] = useState<SceneSystem>({
+    center: "sun",
+    frame: "J2000",
+  });
+  const [catalog, setCatalog] = useState<PlanetCatalog | null>(null);
+  const [planetDialog, setPlanetDialog] = useState(false);
+  const [stars, setStars] = useState(false);
+  const [cameraRestore, setCameraRestore] = useState<CameraState | null>(null);
+  const [following, setFollowing] = useState<string | null>(null);
+  const planetIds = useMemo(
+    () => [
+      ...new Set(
+        layers.filter((l) => l.kind === "planet").map((l) => l.body_id!),
+      ),
+    ],
+    [layers],
+  );
+  const ephemeris = usePlanetWindow(
+    planetIds,
+    system,
+    base,
+    time,
+    speed,
+    leaps,
+    catalog,
+  );
+  const planetFrame = useMemo(
+    () => planetSnapshot(ephemeris.data, time),
+    [ephemeris.data, time],
+  );
+  const planetBuffer = useRef({
+    data: ephemeris.data,
+    active: planetIds.length > 0,
+  });
+  planetBuffer.current = { data: ephemeris.data, active: planetIds.length > 0 };
   const scene = useRef<SceneHandle>(null);
   const openProject = useRef<HTMLInputElement>(null);
   const version = useRef(0);
@@ -133,22 +179,34 @@ export default function App() {
     [currentDataset, base, time],
   );
   const sourceSample = current?.sample;
+  const currentPlanet = currentLayer?.body_id
+    ? planetFrame?.bodies[currentLayer.body_id]
+    : undefined;
   const displayedElements =
     currentLayer?.kind === "hypothesis"
       ? currentLayer.hypothesis?.elements
       : sourceSample?.elements;
   const utc = utcLabel(base, time, leaps);
   const bounds = useMemo(() => {
-    if (!base || !datasets.length) return [0, 0];
+    if (!base) return [0, 0];
+    if (planetIds.length && catalog && leaps.length)
+      return [
+        utcInputSeconds(catalog.min_utc.replace(/Z$/, ""), base, leaps),
+        utcInputSeconds(catalog.max_utc.replace(/Z$/, ""), base, leaps),
+      ];
+    if (!datasets.length) return [0, 0];
     return [
       Math.min(...datasets.map((d) => offsetSeconds(d, base) + d.samples[0].t)),
       Math.max(
         ...datasets.map((d) => offsetSeconds(d, base) + d.samples.at(-1)!.t),
       ),
     ];
-  }, [datasets, base]);
+  }, [datasets, base, planetIds, catalog, leaps]);
 
   useEffect(() => {
+    void api<PlanetCatalog>("/planets/catalog")
+      .then(setCatalog)
+      .catch((e) => setError(e.message));
     api<{ leap_seconds: Leap[] }>("/presets")
       .then((p) => {
         setLeaps(p.leap_seconds);
@@ -177,6 +235,14 @@ export default function App() {
         lastUpdate = now;
         setTime((t) => {
           const next = t + dt;
+          const buffer = planetBuffer.current;
+          if (
+            buffer.active &&
+            (!buffer.data ||
+              Math.min(next, end) < buffer.data.times[0] ||
+              Math.min(next, end) > buffer.data.times.at(-1)!)
+          )
+            return t;
           if (next >= end) {
             setPlaying(false);
             return end;
@@ -201,6 +267,7 @@ export default function App() {
           "input,textarea,select,button",
         ) ||
         importing ||
+        planetDialog ||
         help
       )
         return;
@@ -211,12 +278,14 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [togglePlay, importing, help]);
+  }, [togglePlay, importing, help, planetDialog]);
 
   function patchLayer(id: string, patch: Partial<Layer>) {
     setLayers((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
   }
   function addDataset(ds: Dataset) {
+    if (!layers.length)
+      setSystem({ center: ds.metadata.center, frame: ds.metadata.frame });
     const nextBase = base || ds.reference_tai;
     const offset =
       calendarSeconds(ds.reference_tai) - calendarSeconds(nextBase);
@@ -246,6 +315,60 @@ export default function App() {
     setError("");
     setStatus(`已导入 ${ds.samples.length.toLocaleString()} 个有效采样点`);
   }
+  async function addPlanets(
+    ids: BodyId[],
+    coordinateSystem: SceneSystem,
+    epoch: string,
+  ) {
+    if (!catalog?.ready || !leaps.length)
+      throw new Error("本地星历或时间预设尚未就绪。");
+    const chosen = ids.filter((id) => !planetIds.includes(id));
+    if (!chosen.length) throw new Error("所选行星已经在场景中。");
+    if (!base) {
+      const tai =
+        utcInputSeconds(epoch, "2000-01-01T00:00:00", leaps) +
+        calendarSeconds("2000-01-01T00:00:00");
+      if (!Number.isFinite(tai)) throw new Error("请填写有效的 UTC 初始日期。");
+      const utcEpoch = Date.parse(epoch + "Z");
+      if (
+        utcEpoch < Date.parse(catalog.min_utc) ||
+        utcEpoch > Date.parse(catalog.max_utc)
+      )
+        throw new Error("行星日期需在 1972–2150 年星历范围内。");
+      const nextBase = new Date(tai * 1000).toISOString().replace(/Z$/, "");
+      setBase(nextBase);
+      setStart(0);
+      setTime(0);
+      setEnd(
+        Math.min(
+          365.25 * 86400,
+          utcInputSeconds(catalog.max_utc.replace(/Z$/, ""), nextBase, leaps),
+        ),
+      );
+      setSystem(coordinateSystem);
+      setSpeed(3600);
+    }
+    const added: Layer[] = chosen.map((id) => {
+      const body = catalog.bodies.find((b) => b.id === id)!;
+      return {
+        id: crypto.randomUUID(),
+        kind: "planet",
+        body_id: id,
+        name: body.name,
+        color: body.color,
+        visible: true,
+        showTrack: false,
+        showTrail: false,
+        showLabel: true,
+        showMeridian: id === "earth",
+      };
+    });
+    setLayers((current) => [...current, ...added]);
+    setSelected(added[0].id);
+    setPlaying(false);
+    setPlanetDialog(false);
+    setStatus("已添加 " + added.length + " 个行星图层");
+  }
   async function loadSample() {
     setBusy(true);
     setError("");
@@ -271,7 +394,7 @@ export default function App() {
     const remaining = datasets.filter((d) => keep.has(d.id));
     setDatasets(remaining);
     setPlaying(false);
-    if (remaining.length) {
+    if (remaining.length && !next.some((l) => l.kind === "planet")) {
       const lo = Math.min(
         ...remaining.map((d) => offsetSeconds(d, base) + d.samples[0].t),
       );
@@ -310,6 +433,8 @@ export default function App() {
     setStart(0);
     setEnd(0);
     setPlaying(false);
+    setCameraRestore(null);
+    setFollowing(null);
     setPreview(null);
     setConic(null);
     setError("");
@@ -327,6 +452,9 @@ export default function App() {
         grid,
         radius_km: radius,
         trail_s: trailSeconds,
+        scene: system,
+        stars,
+        camera: scene.current?.getCamera() || undefined,
       };
       const project = await post<unknown>("/projects/export", {
         dataset_ids: datasets.map((d) => d.id),
@@ -361,6 +489,16 @@ export default function App() {
         { method: "POST", body },
       );
       const s = restored.state;
+      setSystem(
+        s.scene || {
+          center: restored.datasets[0].metadata.center,
+          frame: restored.datasets[0].metadata.frame,
+        },
+      );
+      setStars(s.stars || false);
+      setCameraRestore(s.camera || null);
+      setFollowing(s.camera?.follow_id || null);
+      if (!s.camera) setFit((v) => v + 1);
       setDatasets(restored.datasets);
       setLayers(s.layers);
       setSelected(
@@ -385,8 +523,8 @@ export default function App() {
           (d) => offsetSeconds(d, s.clock.base_tai) + d.samples.at(-1)!.t,
         ),
       );
-      setStart(s.clock.start ?? lo);
-      setEnd(s.clock.end ?? hi);
+      setStart(s.clock.start ?? (Number.isFinite(lo) ? lo : 0));
+      setEnd(s.clock.end ?? (Number.isFinite(hi) ? hi : 86400));
       setConic(null);
       setPreview(null);
       setEditing(false);
@@ -512,17 +650,21 @@ export default function App() {
     }
   }
   const position =
-    currentLayer?.kind === "hypothesis"
-      ? currentLayer.curve?.position_km
-      : current?.position;
+    currentLayer?.kind === "planet"
+      ? currentPlanet?.position
+      : currentLayer?.kind === "hypothesis"
+        ? currentLayer.curve?.position_km
+        : current?.position;
   const distance = position ? Math.hypot(...position) : null;
   const sceneCurve = preview?.curve || conic;
   const mode =
-    currentLayer?.kind === "hypothesis"
-      ? "静态假设"
-      : current?.interpolated
-        ? "位置插值"
-        : "源采样";
+    currentLayer?.kind === "planet"
+      ? "行星星历"
+      : currentLayer?.kind === "hypothesis"
+        ? "静态假设"
+        : current?.interpolated
+          ? "位置插值"
+          : "源采样";
 
   return (
     <div className="workbench">
@@ -540,7 +682,7 @@ export default function App() {
             <i />
             本地运行
           </span>
-          <span className="version">v0.1</span>
+          <span className="version">v0.2</span>
           <Tool label="使用说明" onClick={() => setHelp(true)}>
             <CircleHelp size={18} />
           </Tool>
@@ -559,6 +701,17 @@ export default function App() {
           >
             <Plus size={15} />
             导入数据
+          </button>
+          <button
+            className="quiet compact"
+            onClick={() => {
+              setPlanetDialog(true);
+              setPlaying(false);
+            }}
+            disabled={busy}
+          >
+            <Globe2 size={15} />
+            添加行星
           </button>
           <Tool label="新建工作台" onClick={newProject} disabled={busy}>
             <FilePlus2 size={17} />
@@ -600,7 +753,14 @@ export default function App() {
           </Tool>
         </div>
         <div className="toolbar-group">
-          <span className="toolbar-note">固定视角 / 几何分析</span>
+          <span className="toolbar-note">自由视角 / 轨道与行星</span>
+          <Tool
+            label="星空背景"
+            onClick={() => setStars((v) => !v)}
+            active={stars}
+          >
+            <Sparkles size={16} />
+          </Tool>
           <button
             className="quiet compact"
             onClick={() => scene.current?.exportPng()}
@@ -660,7 +820,9 @@ export default function App() {
                     <small>
                       {l.kind === "hypothesis"
                         ? "假设轨道 · 静态"
-                        : `采样轨迹 ${String(i + 1).padStart(2, "0")}`}
+                        : l.kind === "planet"
+                          ? "行星图层 · DE440s"
+                          : `采样轨迹 ${String(i + 1).padStart(2, "0")}`}
                     </small>
                   </span>
                 </button>
@@ -675,7 +837,18 @@ export default function App() {
               </div>
             ))}
           </div>
-          {currentLayer && currentDataset ? (
+          {currentLayer?.kind === "planet" ? (
+            <PlanetInspector
+              layer={currentLayer}
+              info={catalog?.bodies.find((b) => b.id === currentLayer.body_id)}
+              state={currentPlanet}
+              system={system}
+              following={following === currentLayer.id}
+              patch={(patch) => patchLayer(currentLayer.id, patch)}
+              focus={() => scene.current?.command("focus")}
+              follow={() => scene.current?.command("follow")}
+            />
+          ) : currentLayer && currentDataset ? (
             <div className="properties">
               <button
                 className="properties-heading"
@@ -898,9 +1071,18 @@ export default function App() {
               trailSeconds={trailSeconds}
               fit={fit}
               conic={sceneCurve}
+              system={system}
+              stars={stars}
+              planetWindow={ephemeris.data}
+              cameraRestore={cameraRestore}
+              onFollow={setFollowing}
+              onError={setError}
               overlay={[
                 "ORBIT · " + (utc === "—" ? "静态场景" : niceDate(utc)),
-                `${datasets[0]?.metadata.center === "earth" ? "地球中心" : "太阳中心"} / ${datasets[0]?.metadata.frame || "J2000"} · ${datasets[0]?.metadata.metadata_status === "provisional" ? "暂用假设" : "已核实"}`,
+                `${system.center === "earth" ? "地球中心" : "太阳中心"} / ${system.frame} · ${datasets[0]?.metadata.metadata_status === "provisional" ? "CSV 参考系暂用假设" : "场景参考系"}`,
+                ...(currentPlanet?.quality === "approximate"
+                  ? ["地球姿态近似：UT1≈UTC，极移=0"]
+                  : []),
                 ...(currentLayer ? [currentLayer.name + " · " + mode] : []),
                 ...(distance
                   ? ["距离 " + number(distance / AU, 6) + " AU"]
@@ -916,8 +1098,8 @@ export default function App() {
             <div className="view-corner">
               <span className="eyebrow">ORBITAL VIEW</span>
               <span>
-                {datasets.length
-                  ? `${datasets[0].metadata.center === "sun" ? "日心" : "地心"} · ${datasets[0].metadata.frame}`
+                {layers.length
+                  ? `${system.center === "sun" ? "日心" : "地心"} · ${system.frame}`
                   : "三维轨道工作空间"}
               </span>
             </div>
@@ -937,15 +1119,21 @@ export default function App() {
                       </div>
                       <div>
                         <dt>
-                          {currentLayer?.kind === "hypothesis"
-                            ? "假设密切速度"
-                            : "源采样密切速度"}
+                          {currentLayer?.kind === "planet"
+                            ? "星历插值速度"
+                            : currentLayer?.kind === "hypothesis"
+                              ? "假设密切速度"
+                              : "源采样密切速度"}
                         </dt>
                         <dd>
                           {number(
-                            currentLayer?.kind === "hypothesis"
-                              ? currentLayer.curve?.speed_km_s
-                              : sourceSample?.speed_km_s,
+                            currentLayer?.kind === "planet"
+                              ? currentPlanet
+                                ? Math.hypot(...currentPlanet.velocity)
+                                : null
+                              : currentLayer?.kind === "hypothesis"
+                                ? currentLayer.curve?.speed_km_s
+                                : sourceSample?.speed_km_s,
                             3,
                           )}{" "}
                           <small>km/s</small>
@@ -968,12 +1156,14 @@ export default function App() {
                 <div className="scene-bottom-note">
                   <span>
                     <i />
-                    标记尺寸经过放大 · 距离线性比例
+                    行星采用真实半径 · 远景光点增强 · 距离线性比例
                   </span>
                   <span>
-                    {currentLayer?.kind !== "hypothesis" && !current
-                      ? "所选对象：当前无数据"
-                      : mode}
+                    {currentLayer?.kind === "planet" && !currentPlanet
+                      ? "行星位置读取中"
+                      : currentLayer?.kind === "dataset" && !current
+                        ? "所选对象：当前无数据"
+                        : mode}
                   </span>
                 </div>
                 {sceneCurve && (
@@ -1023,6 +1213,13 @@ export default function App() {
                   </button>
                   <button
                     className="quiet"
+                    onClick={() => setPlanetDialog(true)}
+                  >
+                    <Globe2 size={15} />
+                    添加行星
+                  </button>
+                  <button
+                    className="quiet"
                     onClick={loadSample}
                     disabled={busy}
                   >
@@ -1035,6 +1232,48 @@ export default function App() {
               </div>
             )}
             <div className="view-tools">
+              <select
+                aria-label="标准视角"
+                defaultValue=""
+                onChange={(e) => {
+                  scene.current?.command(e.target.value as "top");
+                  e.target.value = "";
+                }}
+              >
+                <option value="" disabled>
+                  自由视角
+                </option>
+                <option value="top">俯视 XY</option>
+                <option value="front">正视 XZ</option>
+                <option value="side">侧视 YZ</option>
+              </select>
+              <Tool
+                label="聚焦选中对象"
+                onClick={() => scene.current?.command("focus")}
+                disabled={!currentLayer}
+              >
+                <Crosshair size={17} />
+              </Tool>
+              <Tool
+                label="跟随选中对象"
+                onClick={() => scene.current?.command("follow")}
+                active={!!selected && following === selected}
+                disabled={!currentLayer}
+              >
+                <Move3D size={17} />
+              </Tool>
+              <Tool
+                label="向左滚转15度"
+                onClick={() => scene.current?.command("rollLeft")}
+              >
+                <RotateCcw size={16} />
+              </Tool>
+              <Tool
+                label="向右滚转15度"
+                onClick={() => scene.current?.command("rollRight")}
+              >
+                <RotateCw size={16} />
+              </Tool>
               <Tool label="适配可见轨迹" onClick={() => setFit((v) => v + 1)}>
                 <Crosshair size={18} />
               </Tool>
@@ -1043,12 +1282,23 @@ export default function App() {
               </Tool>
             </div>
           </section>
+          {(ephemeris.loading || ephemeris.error) && (
+            <div
+              className={
+                "ephemeris-banner " + (ephemeris.error ? "failed" : "")
+              }
+            >
+              {ephemeris.error || "正在读取本地星历…"}
+            </div>
+          )}
           <section className="timeline" aria-label="时间轴">
             <div className="timeline-heading">
               <div>
                 <Activity size={14} />
                 <strong>时间轴</strong>
-                <span>采样数据回放</span>
+                <span>
+                  {planetIds.length ? "采样回放 / 行星星历" : "采样数据回放"}
+                </span>
               </div>
               <div className="timeline-options">
                 <label>
@@ -1127,6 +1377,19 @@ export default function App() {
                   <span className="placeholder-track" />
                 </div>
               )}
+              {layers
+                .filter((l) => l.kind === "planet")
+                .map((l) => (
+                  <div
+                    className="track planet-track"
+                    title={l.name + " · 星历覆盖"}
+                    key={l.id}
+                  >
+                    <span
+                      style={{ left: 0, width: "100%", background: l.color }}
+                    />
+                  </div>
+                ))}
               <div
                 className="playhead"
                 style={{
@@ -1160,7 +1423,12 @@ export default function App() {
                 <button
                   className="play-button"
                   aria-label={playing ? "暂停" : "播放"}
-                  disabled={!layers.length || end <= start || editing}
+                  disabled={
+                    !layers.length ||
+                    end <= start ||
+                    editing ||
+                    (planetIds.length > 0 && !planetFrame)
+                  }
                   onClick={togglePlay}
                 >
                   {playing ? (
@@ -1238,7 +1506,8 @@ export default function App() {
           {datasets
             .reduce((sum, d) => sum + d.samples.length, 0)
             .toLocaleString()}{" "}
-          采样点<span className="status-separator">/</span>无时间传播
+          采样点{planetIds.length > 0 ? " / " + planetIds.length + " 行星" : ""}
+          <span className="status-separator">/</span>CSV 无时间传播
           <span className="status-separator">/</span>WebGL2
         </span>
       </footer>
@@ -1253,12 +1522,32 @@ export default function App() {
       {importing && (
         <ImportDialog
           initialFile={initialFile}
-          scene={datasets[0]?.metadata}
+          scene={
+            datasets[0]?.metadata ||
+            (layers.length
+              ? {
+                  ...defaultMetadata,
+                  ...system,
+                  metadata_status: "verified",
+                  metadata_notes: "与当前行星场景使用相同的中心和参考系",
+                }
+              : undefined)
+          }
           onClose={() => {
             setImporting(false);
             setInitialFile(undefined);
           }}
           onImport={addDataset}
+        />
+      )}
+      {planetDialog && (
+        <PlanetDialog
+          catalog={catalog}
+          existing={planetIds}
+          scene={layers.length ? system : null}
+          busy={busy}
+          onClose={() => setPlanetDialog(false)}
+          onAdd={addPlanets}
         />
       )}
       {help && (
@@ -1287,9 +1576,9 @@ export default function App() {
               <li>保存项目包含源数据、元数据与清洗记录；PNG 输出当前场景。</li>
             </ol>
             <p className="hint">
-              空格播放/暂停。初版为固定视角，不含时间传播或内置行星星历。样例参考系暂按日心
-              J2000 赤道面，待核实。时间轴支持 1972 年起的数据，未来 UTC
-              使用现有闰秒表。
+              空格播放/暂停。左键旋转、滚轮缩放、右键平移，可自由翻转；聚焦与跟随可近距离查看行星。行星使用本地星历，CSV
+              不含时间传播。样例参考系暂按日心 J2000 赤道面，待核实。时间轴支持
+              1972 年起的数据，未来 UTC 使用现有闰秒表。
             </p>
             <button className="primary" onClick={() => setHelp(false)}>
               开始探索 <Sparkles size={14} />

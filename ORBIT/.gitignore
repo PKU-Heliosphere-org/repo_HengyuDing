@@ -30,5 +30,6 @@ frontend/playwright-report/
 # Local generated output
 exports/
 data/cache/
+data/ephemeris/
 *.log
 *.pid

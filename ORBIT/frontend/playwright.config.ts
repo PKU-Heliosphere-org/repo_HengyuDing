@@ -10,7 +10,7 @@ export default defineConfig({
   expect: { timeout: 10000 },
   workers: 1,
   use: {
-    baseURL: "http://127.0.0.1:8765",
+    baseURL: process.env.ORBIT_TEST_URL || "http://127.0.0.1:8765",
     channel: "chromium",
     viewport: { width: 1440, height: 900 },
     launchOptions: {

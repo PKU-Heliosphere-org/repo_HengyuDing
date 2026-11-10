@@ -1,12 +1,12 @@
 {
   "name": "orbit-workbench",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
-    "test": "vitest run tests/time.test.ts tests/geometry.test.ts",
+    "test": "vitest run tests/time.test.ts tests/geometry.test.ts tests/planets.test.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {

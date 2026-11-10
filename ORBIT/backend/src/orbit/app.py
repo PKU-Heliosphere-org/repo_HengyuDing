@@ -19,6 +19,7 @@ from . import __version__
 from .importer import MAX_BYTES, ImportProblem, read_csv, validate
 from .mechanics import conic
 from .models import CENTERS, ImportRequest, PreviewRequest, StrictModel
+from . import planets
 
 ROOT = Path(__file__).resolve().parents[3]
 app = FastAPI(title="ORBIT", version=__version__)
@@ -71,7 +72,17 @@ def public_dataset(ds):
 
 @app.get("/api/v1/health")
 def health():
-    return {"app": "ORBIT", "version": __version__, "schema_version": 1, "propagation": False}
+    return {"app": "ORBIT", "version": __version__, "schema_version": 2, "propagation": False}
+
+
+@app.get("/api/v1/planets/catalog")
+def planet_catalog():
+    return planets.catalog()
+
+
+@app.post("/api/v1/planets/window")
+def planet_window(body: planets.WindowRequest):
+    return planets.window(body)
 
 
 @app.get("/api/v1/presets")
@@ -161,13 +172,22 @@ def validate_project_state(state, dataset_map):
     if not isinstance(state, dict) or not isinstance(state.get("layers"), list) or len(state["layers"]) > 128:
         raise ImportProblem("项目图层结构无效")
     layer_ids = set()
+    has_planets = False
+    coordinate_system = state.get("scene")
+    if coordinate_system is None and dataset_map:
+        origin = next(iter(dataset_map.values()))["metadata"]
+        coordinate_system = {"center":origin["center"],"frame":origin["frame"]}
+    if not isinstance(coordinate_system, dict) or coordinate_system.get("center") not in {"sun","earth"} or coordinate_system.get("frame") not in {"J2000","ECLIPJ2000"}:
+        raise ImportProblem("项目场景中心或参考系无效")
+    if any(ds["metadata"]["center"] != coordinate_system["center"] or ds["metadata"]["frame"] != coordinate_system["frame"] for ds in dataset_map.values()):
+        raise ImportProblem("项目混合了不同中心或参考系")
     for layer in state["layers"]:
         if not isinstance(layer, dict) or not isinstance(layer.get("id"), str) or layer["id"] in layer_ids:
             raise ImportProblem("项目图层 ID 无效或重复")
         layer_ids.add(layer["id"])
-        if layer.get("dataset_id") not in ids:
+        if layer.get("kind") != "planet" and layer.get("dataset_id") not in ids:
             raise ImportProblem("项目图层引用了不存在的数据集")
-        if layer.get("kind") not in {"dataset", "hypothesis"}:
+        if layer.get("kind") not in {"dataset", "hypothesis", "planet"}:
             raise ImportProblem("未知图层类型")
         if not isinstance(layer.get("name"), str) or not isinstance(layer.get("color"), str):
             raise ImportProblem("图层名称或颜色无效")
@@ -176,6 +196,12 @@ def validate_project_state(state, dataset_map):
         for flag in ["visible", "showTrack", "showTrail", "showLabel"]:
             if not isinstance(layer.get(flag), bool):
                 raise ImportProblem("图层开关无效")
+        if layer["kind"] == "planet":
+            has_planets = True
+            if layer.get("body_id") not in planets.BODIES:
+                raise ImportProblem("未知行星")
+            if "showMeridian" in layer and not isinstance(layer["showMeridian"],bool):
+                raise ImportProblem("经线开关无效")
         if layer["kind"] == "hypothesis":
             try:
                 req = PreviewRequest.model_validate(layer["hypothesis"])
@@ -196,8 +222,12 @@ def validate_project_state(state, dataset_map):
         if not 0 < clock["speed"] <= 1e12:
             raise ValueError()
         base = Time(clock["base_tai"], format="isot", scale="tai")
-        first = min((Time(ds["reference_tai"], scale="tai")-base).to_value('sec')+ds["samples"][0]["t"] for ds in dataset_map.values())
-        last = max((Time(ds["reference_tai"], scale="tai")-base).to_value('sec')+ds["samples"][-1]["t"] for ds in dataset_map.values())
+        lows = [(Time(ds["reference_tai"], scale="tai")-base).to_value('sec')+ds["samples"][0]["t"] for ds in dataset_map.values()]
+        highs = [(Time(ds["reference_tai"], scale="tai")-base).to_value('sec')+ds["samples"][-1]["t"] for ds in dataset_map.values()]
+        if has_planets:
+            lows.append((Time(planets.MIN_UTC,scale="utc")-base).to_value("sec"))
+            highs.append((Time(planets.MAX_UTC,scale="utc")-base).to_value("sec"))
+        first, last = min(lows), max(highs)
         start, end = clock.get("start", first), clock.get("end", last)
         if not all(isinstance(v, (int,float)) and math.isfinite(v) for v in [start,end]):
             raise ValueError()
@@ -209,10 +239,25 @@ def validate_project_state(state, dataset_map):
         raise ImportProblem("所选图层不存在")
     if not all(isinstance(state.get(key), bool) for key in ["axes","grid"]):
         raise ImportProblem("视图开关无效")
+    if "stars" in state and not isinstance(state["stars"],bool):
+        raise ImportProblem("星空开关无效")
     for key in ["radius_km","trail_s"]:
         value = state.get(key)
         if not isinstance(value, (int,float)) or not math.isfinite(value) or not 0 < value <= 1e16:
             raise ImportProblem("显示半径或尾迹时长无效")
+    camera = state.get("camera")
+    if camera is not None:
+        try:
+            for field in ["position_km","target_km","up"]:
+                vector = camera[field]
+                if not isinstance(vector,list) or len(vector)!=3 or not all(type(v) in (float,int) and math.isfinite(v) for v in vector):
+                    raise ValueError()
+            if math.dist(camera["position_km"],camera["target_km"]) < .000001 or math.hypot(*camera["up"]) < 1e-10:
+                raise ValueError()
+            if camera.get("follow_id") is not None and camera["follow_id"] not in layer_ids:
+                raise ValueError()
+        except (KeyError,TypeError,ValueError):
+            raise ImportProblem("相机状态无效")
     finite_json(state)
     return state
 
@@ -220,10 +265,10 @@ def validate_project_state(state, dataset_map):
 @app.post("/api/v1/projects/export")
 def export_project(body: ExportRequest):
     chosen = [get_entry(datasets, key) for key in dict.fromkeys(body.dataset_ids)]
-    if not chosen:
-        raise ImportProblem("项目至少需要一个数据集")
+    if not chosen and not any(l.get("kind")=="planet" for l in body.state.get("layers",[]) if isinstance(l,dict)):
+        raise ImportProblem("项目至少需要一个数据集或行星图层")
     state = validate_project_state(body.state, {d["id"]:d for d in chosen})
-    data = {"schema_version": 1, "app_version": __version__, "state": state,
+    data = {"schema_version": 2, "app_version": __version__, "state": state,
             "datasets": [{"id": d["id"], "filename": d["filename"], "source_base64": d["source_base64"],
                           "source_sha256": d["source_sha256"], "import_request": d["import_request"]} for d in chosen]}
     encoded = finite_json(data).encode("utf-8")
@@ -239,9 +284,9 @@ async def import_project(file: UploadFile = File(...)):
         raise ImportProblem("项目超过 100 MiB", "file_too_large", status=413)
     try:
         project = json.loads(raw)
-        if project["schema_version"] != 1:
+        if project["schema_version"] not in {1,2}:
             raise ImportProblem("不支持的项目版本", "schema_version")
-        if not isinstance(project["datasets"], list) or not 1 <= len(project["datasets"]) <= 64:
+        if not isinstance(project["datasets"], list) or not 0 <= len(project["datasets"]) <= 64:
             raise ImportProblem("项目数据集过多或结构无效")
         rebuilt = {}
         for item in project["datasets"]:
@@ -271,5 +316,8 @@ async def import_project(file: UploadFile = File(...)):
 
 
 DIST = ROOT / "frontend" / "dist"
+TEXTURES = ROOT / "textures"
+if TEXTURES.is_dir():
+    app.mount("/textures",StaticFiles(directory=TEXTURES),name="textures")
 if DIST.is_dir():
     app.mount("/", StaticFiles(directory=DIST, html=True), name="frontend")
