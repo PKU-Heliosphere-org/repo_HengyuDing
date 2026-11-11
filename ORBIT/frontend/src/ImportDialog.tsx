@@ -10,9 +10,22 @@ type Props = {
   onClose: () => void;
   onImport: (ds: Dataset) => void;
 };
+type WorkbookChoice = {
+  requires_worksheet: true;
+  worksheets: string[];
+};
+const freshDecisions = (): Decisions => ({
+  deduplicate: false,
+  sort: false,
+  exclude_rows: [],
+  conflict_choices: {},
+  override_units: false,
+});
 export function ImportDialog({ initialFile, scene, onClose, onImport }: Props) {
   const [file, setFile] = useState<File | undefined>(initialFile);
   const [inspection, setInspection] = useState<Inspection | null>(null);
+  const [worksheets, setWorksheets] = useState<string[]>([]);
+  const [worksheet, setWorksheet] = useState("");
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [metadata, setMetadata] = useState<Metadata>({
     ...defaultMetadata,
@@ -25,17 +38,20 @@ export function ImportDialog({ initialFile, scene, onClose, onImport }: Props) {
         }
       : {}),
   });
-  const [decisions, setDecisions] = useState<Decisions>({
-    deduplicate: false,
-    sort: false,
-    exclude_rows: [],
-    conflict_choices: {},
-    override_units: false,
-  });
+  const [decisions, setDecisions] = useState<Decisions>(freshDecisions);
   const [report, setReport] = useState<Report | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [exclude, setExclude] = useState("");
+  function resetInspection() {
+    if (inspection) void api(`/imports/${inspection.id}`, { method: "DELETE" });
+    setInspection(null);
+    setMapping({});
+    setReport(null);
+    setDecisions(freshDecisions());
+    setExclude("");
+    setError("");
+  }
   function updateMeta(patch: Partial<Metadata>) {
     setMetadata((m) => ({ ...m, ...patch }));
     setReport(null);
@@ -47,15 +63,23 @@ export function ImportDialog({ initialFile, scene, onClose, onImport }: Props) {
     try {
       const data = new FormData();
       data.append("file", file);
-      const found = await api<Inspection>("/imports/inspect", {
+      if (worksheet) data.append("worksheet", worksheet);
+      const found = await api<Inspection | WorkbookChoice>("/imports/inspect", {
         method: "POST",
         body: data,
       });
+      if ("requires_worksheet" in found) {
+        setWorksheets(found.worksheets);
+        setWorksheet(found.worksheets[0] || "");
+        return;
+      }
       setInspection(found);
+      setWorksheets(found.worksheets || []);
+      setWorksheet(found.worksheet || "");
       setMapping(found.mapping);
       setMetadata((m) => ({
         ...m,
-        object_name: file.name.replace(/\.csv$/i, "").slice(0, 120),
+        object_name: file.name.replace(/\.(csv|xlsx)$/i, "").slice(0, 120),
       }));
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
@@ -131,26 +155,64 @@ export function ImportDialog({ initialFile, scene, onClose, onImport }: Props) {
           {!inspection ? (
             <>
               <p className="muted">
-                CSV 轨道根数 · UTF-8 · 最多 100,000 行 / 20 MiB
+                CSV / XLSX 轨道根数 · 最多 100,000 条数据 / 20 MiB；CSV 使用
+                UTF-8
               </p>
               <label className="file-drop">
                 <Upload size={30} />
                 <strong>{file?.name || "选择轨道根数文件"}</strong>
                 <span>支持样例表头或规范字段名</span>
                 <input
-                  aria-label="选择CSV"
+                  aria-label="选择CSV或XLSX"
                   type="file"
-                  accept=".csv,text/csv"
-                  onChange={(e) => setFile(e.target.files?.[0])}
+                  accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  disabled={busy}
+                  onChange={(e) => {
+                    resetInspection();
+                    setFile(e.target.files?.[0]);
+                    setWorksheets([]);
+                    setWorksheet("");
+                  }}
                 />
               </label>
+              {worksheets.length > 0 && (
+                <div className="form-grid">
+                  <label>
+                    选择工作表
+                    <select
+                      aria-label="XLSX工作表"
+                      value={worksheet}
+                      disabled={busy}
+                      onChange={(e) => setWorksheet(e.target.value)}
+                    >
+                      {worksheets.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="hint">
+                    第一条非空行作为表头；日期时间单元格或 ISO
+                    时间文本均可读取。
+                  </p>
+                </div>
+              )}
             </>
           ) : (
             <>
               <div className="file-summary">
                 <Check size={17} />
                 <strong>{inspection.filename}</strong>
-                <span>{inspection.input_rows.toLocaleString()} 条原始记录</span>
+                <span>
+                  {inspection.worksheet ? `${inspection.worksheet} · ` : ""}
+                  {inspection.input_rows.toLocaleString()} 条原始记录
+                </span>
+                {worksheets.length > 1 && (
+                  <button onClick={resetInspection} disabled={busy}>
+                    更换工作表
+                  </button>
+                )}
               </div>
               <h3>01 / 数据解释</h3>
               <div className="form-grid">
@@ -395,7 +457,7 @@ export function ImportDialog({ initialFile, scene, onClose, onImport }: Props) {
                 </label>
               </div>
               <label className="exclude">
-                明确排除的 CSV 行号（含表头，逗号分隔）
+                明确排除的源表行号（含表头，逗号分隔）
                 <input
                   value={exclude}
                   placeholder="例如：12, 15"
@@ -499,7 +561,8 @@ export function ImportDialog({ initialFile, scene, onClose, onImport }: Props) {
                 onClick={inspect}
                 disabled={!file || busy}
               >
-                读取文件 <ArrowRight size={15} />
+                {worksheets.length ? "读取工作表" : "读取文件"}{" "}
+                <ArrowRight size={15} />
               </button>
             ) : (
               <>

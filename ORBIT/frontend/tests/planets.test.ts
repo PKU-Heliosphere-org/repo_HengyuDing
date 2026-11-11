@@ -5,9 +5,70 @@ import {
   hermiteVelocity,
   planetSnapshot,
   slerp,
+  osculatingPlanetOrbit,
+  SOLAR_MU,
 } from "../src/planetMath";
 import { AU_KM, PlanetVisual } from "../src/planetSurface";
 import type { PlanetState, PlanetWindow } from "../src/types";
+
+describe("instantaneous closed planet orbits", () => {
+  it("closes a circular orbit through the current point and preserves its inclined plane", () => {
+    const velocity = Math.sqrt(SOLAR_MU / AU_KM);
+    const points = osculatingPlanetOrbit(
+      [AU_KM, 0, 0],
+      [0, 0, velocity],
+      [0, 0, 0],
+      [0, 0, 0],
+    );
+    expect(points).toHaveLength(1025);
+    expect(points[0]).toEqual([AU_KM, 0, 0]);
+    expect(points.at(-1)).toEqual(points[0]);
+    for (const p of points) {
+      expect(Math.hypot(...p)).toBeCloseTo(AU_KM, 5);
+      expect(p[1]).toBe(0);
+    }
+  });
+  it("recovers periapsis and apoapsis from an eccentric instantaneous state", () => {
+    const e = 0.2,
+      peri = AU_KM * (1 - e),
+      speed = Math.sqrt((SOLAR_MU * (1 + e)) / peri);
+    const points = osculatingPlanetOrbit(
+      [peri, 0, 0],
+      [0, speed, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+    );
+    expect(Math.hypot(...points[0])).toBeCloseTo(peri, 5);
+    expect(Math.hypot(...points[512])).toBeCloseTo(AU_KM * (1 + e), 5);
+  });
+  it("subtracts solar velocity in geocentric scenes and never forces an unbound orbit closed", () => {
+    const speed = Math.sqrt(SOLAR_MU / AU_KM);
+    const base = osculatingPlanetOrbit(
+      [AU_KM, 0, 0],
+      [0, speed, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+    );
+    const shifted = osculatingPlanetOrbit(
+      [0, 100, 0],
+      [0, speed - 25, 0],
+      [-AU_KM, 100, 0],
+      [0, -25, 0],
+    );
+    for (let i = 0; i < base.length; i++) {
+      expect(shifted[i][0]).toBeCloseTo(base[i][0] - AU_KM, 5);
+      expect(shifted[i][1]).toBeCloseTo(base[i][1] + 100, 5);
+    }
+    expect(
+      osculatingPlanetOrbit(
+        [AU_KM, 0, 0],
+        [0, 2 * speed, 0],
+        [0, 0, 0],
+        [0, 0, 0],
+      ),
+    ).toEqual([]);
+  });
+});
 
 describe("ephemeris display interpolation", () => {
   it("reconstructs constant acceleration and its velocity from endpoint states", () => {

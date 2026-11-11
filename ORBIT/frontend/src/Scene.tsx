@@ -7,10 +7,14 @@ import {
 } from "react";
 import * as THREE from "three";
 import { TrackballControls } from "three/addons/controls/TrackballControls.js";
+import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
+import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { download } from "./api";
 import { drawingIndices, drawingSegments } from "./geometry";
 import { offsetSeconds, sampleAt } from "./time";
-import { planetSnapshot } from "./planetMath";
+import { planetSnapshot, osculatingPlanetOrbit } from "./planetMath";
+import { DEFAULT_GLOW_SIZE, DEFAULT_LINE_WIDTH } from "./types";
 import { AU_KM, PlanetVisual, textureRepository } from "./planetSurface";
 import type {
   BodyId,
@@ -36,6 +40,7 @@ type Props = {
   overlay: string[];
   conic?: Curve | null;
   planetWindow?: PlanetWindow | null;
+  planetTrails?: PlanetWindow | null;
   system: SceneSystem;
   stars: boolean;
   cameraRestore?: CameraState | null;
@@ -62,7 +67,7 @@ type Marker = {
   ds: Dataset;
   point: THREE.Sprite;
   label: HTMLDivElement;
-  trail: THREE.LineSegments;
+  trail: LineSegments2;
   buffer: Float32Array;
   segments: [number, number][];
   offset: number;
@@ -72,6 +77,12 @@ type PlanetMarker = {
   layer: Layer;
   visual: PlanetVisual;
   label: HTMLDivElement;
+  orbit: LineSegments2 | null;
+  trail: LineSegments2;
+  buffer: Float32Array;
+  orbitTime?: number;
+  trailTime?: number;
+  trailSeconds?: number;
 };
 type Runtime = {
   renderer: THREE.WebGLRenderer;
@@ -122,12 +133,33 @@ function glowTexture() {
   ctx.fillRect(0, 0, 128, 128);
   return new THREE.CanvasTexture(canvas);
 }
+function strokeMaterial(
+  color: string,
+  linewidth: number,
+  brightness: number,
+  vertexColors = false,
+) {
+  // Transparent round caps overlap at each shared endpoint and blend twice.
+  // Bake the former opacity into the stroke shade, then use MSAA coverage only
+  // at its edges. Repeated coverage now writes the same color, never bright dots.
+  const shade = new THREE.Color(color).convertLinearToSRGB();
+  shade.lerp(new THREE.Color("#080d13").convertLinearToSRGB(), 1 - brightness);
+  return new LineMaterial({
+    color: shade.convertSRGBToLinear(),
+    linewidth,
+    vertexColors,
+    transparent: false,
+    opacity: 1,
+    alphaToCoverage: true,
+  });
+}
 function curveLines(
   points: Vec3[],
   breaks: Set<number>,
   color: string,
   bound: number,
   opacity: number,
+  linewidth = 1,
 ) {
   const anchor = points.length ? fromKm(points[0]) : new THREE.Vector3();
   const values: number[] = [];
@@ -141,11 +173,13 @@ function curveLines(
       p[1] / AU_KM - anchor.y,
       p[2] / AU_KM - anchor.z,
     );
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.Float32BufferAttribute(values, 3));
-  const line = new THREE.LineSegments(
+  const geo = new LineSegmentsGeometry().setPositions(
+    values.length ? values : [0, 0, 0, 0, 0, 0],
+  );
+  geo.instanceCount = values.length / 6;
+  const line = new LineSegments2(
     geo,
-    new THREE.LineBasicMaterial({ color, transparent: true, opacity }),
+    strokeMaterial(color, linewidth, opacity),
   );
   line.position.copy(anchor);
   line.userData.orbitGeometry = {
@@ -156,7 +190,7 @@ function curveLines(
   };
   return line;
 }
-function refineLine(line: THREE.LineSegments, tolerance: number) {
+function refineLine(line: LineSegments2, tolerance: number, force = false) {
   const source = line.userData.orbitGeometry as
     | {
         points: Vec3[];
@@ -167,7 +201,11 @@ function refineLine(line: THREE.LineSegments, tolerance: number) {
     | undefined;
   if (!source) return;
   const wanted = Math.min(source.maximum, tolerance);
-  if (wanted >= source.tolerance * 0.5 && wanted <= source.tolerance * 2)
+  if (
+    !force &&
+    wanted >= source.tolerance * 0.5 &&
+    wanted <= source.tolerance * 2
+  )
     return;
   const values: number[] = [];
   for (const p of drawingSegments(source.points, source.breaks, wanted))
@@ -177,12 +215,55 @@ function refineLine(line: THREE.LineSegments, tolerance: number) {
       p[2] / AU_KM - line.position.z,
     );
   line.geometry.dispose();
-  line.geometry = new THREE.BufferGeometry();
-  line.geometry.setAttribute(
-    "position",
-    new THREE.Float32BufferAttribute(values, 3),
+  line.geometry = new LineSegmentsGeometry().setPositions(
+    values.length ? values : [0, 0, 0, 0, 0, 0],
   );
+  line.geometry.instanceCount = values.length / 6;
   source.tolerance = wanted;
+}
+function createTrail(lineWidth: number) {
+  const buffer = new Float32Array(4096 * 6);
+  const geometry = new LineSegmentsGeometry()
+    .setPositions(buffer)
+    .setColors(new Float32Array(buffer.length));
+  (
+    geometry.attributes.instanceStart as THREE.InterleavedBufferAttribute
+  ).data.setUsage(THREE.DynamicDrawUsage);
+  (
+    geometry.attributes.instanceColorStart as THREE.InterleavedBufferAttribute
+  ).data.setUsage(THREE.DynamicDrawUsage);
+  geometry.instanceCount = 0;
+  const trail = new LineSegments2(
+    geometry,
+    strokeMaterial("#ffffff", lineWidth, 0.95, true),
+  );
+  trail.frustumCulled = false;
+  return { trail, buffer };
+}
+function writeTrail(
+  trail: LineSegments2,
+  buffer: Float32Array,
+  segments: number[],
+  color: string,
+) {
+  const n = Math.min(4096, segments.length / 6);
+  buffer.set(segments.slice(-n * 6));
+  trail.geometry.instanceCount = n;
+  (
+    trail.geometry.attributes.instanceStart as THREE.InterleavedBufferAttribute
+  ).data.needsUpdate = true;
+  const colors = trail.geometry.attributes
+    .instanceColorStart as THREE.InterleavedBufferAttribute;
+  const colorsEnd = trail.geometry.attributes
+    .instanceColorEnd as THREE.InterleavedBufferAttribute;
+  const c = new THREE.Color(color);
+  for (let i = 0; i < n; i++) {
+    const start = 0.12 + (0.88 * i) / n,
+      end = 0.12 + (0.88 * (i + 1)) / n;
+    colors.setXYZ(i, c.r * start, c.g * start, c.b * start);
+    colorsEnd.setXYZ(i, c.r * end, c.g * end, c.b * end);
+  }
+  colors.data.needsUpdate = true;
 }
 function captureCamera(r: Runtime): CameraState {
   return {
@@ -418,8 +499,8 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
             0.25,
         );
         r.content.traverse((object) => {
-          if ((object as THREE.LineSegments).isLineSegments)
-            refineLine(object as THREE.LineSegments, drawingTolerance);
+          if ((object as LineSegments2).isLineSegments2)
+            refineLine(object as LineSegments2, drawingTolerance);
         });
         for (const m of r.markers) {
           const wanted = Math.min(r.bound * AU_KM * 0.0004, drawingTolerance);
@@ -447,6 +528,12 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
             !!at && m.layer.showTrail && m.layer.kind === "dataset";
           if (!at) continue;
           m.point.position.copy(fromKm(at.position));
+          m.point.scale.setScalar(
+            ((m.layer.glowSize ?? DEFAULT_GLOW_SIZE) *
+              2 *
+              Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) /
+              Math.max(1, height),
+          );
           r.poses.set(m.layer.id, {
             position: m.point.position.clone(),
             radius: Math.max(1 / AU_KM, r.bound * 0.00001),
@@ -488,26 +575,19 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
                   p1[2] / AU_KM - anchor.z,
                 );
             }
-            const n = Math.min(4096, segments.length / 6);
-            m.buffer.set(segments.slice(-n * 6));
-            m.trail.geometry.setDrawRange(0, n * 2);
-            (
-              m.trail.geometry.attributes.position as THREE.BufferAttribute
-            ).needsUpdate = true;
-            const colors = m.trail.geometry.attributes
-                .color as THREE.BufferAttribute,
-              c = new THREE.Color(m.layer.color);
-            for (let i = 0; i < n; i++) {
-              const v = 0.12 + (0.88 * i) / Math.max(1, n - 1);
-              colors.setXYZ(i * 2, c.r * v, c.g * v, c.b * v);
-              colors.setXYZ(i * 2 + 1, c.r * v, c.g * v, c.b * v);
-            }
-            colors.needsUpdate = true;
+            writeTrail(m.trail, m.buffer, segments, m.layer.color);
           }
         }
         for (const m of r.planets) {
           const state = snapshot?.bodies[m.layer.body_id!];
           m.visual.root.visible = !!state;
+          if (m.orbit) m.orbit.visible = !!state;
+          m.trail.visible =
+            !!state &&
+            m.layer.showTrail &&
+            !!p.planetTrails &&
+            p.time >= p.planetTrails.times[0] &&
+            p.time <= p.planetTrails.times.at(-1)!;
           m.label.style.display = "none";
           if (!state) continue;
           m.visual.root.position.copy(fromKm(state.position));
@@ -541,12 +621,64 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
         for (const m of r.planets) {
           const state = snapshot?.bodies[m.layer.body_id!];
           if (!state || !snapshot) continue;
+          if (m.orbit && m.orbitTime !== p.time) {
+            const points = osculatingPlanetOrbit(
+              state.position,
+              state.velocity,
+              snapshot.sun,
+              snapshot.sunVelocity,
+            );
+            m.orbit.userData.orbitGeometry.points = points;
+            m.orbit.position.copy(
+              points.length ? fromKm(points[0]) : new THREE.Vector3(),
+            );
+            refineLine(m.orbit, drawingTolerance, true);
+            m.orbitTime = p.time;
+          }
+          if (
+            m.trail.visible &&
+            (m.trailTime !== p.time || m.trailSeconds !== p.trailSeconds)
+          ) {
+            const history = p.planetTrails!;
+            const start = Math.max(history.times[0], p.time - p.trailSeconds);
+            const startState = planetSnapshot(history, start)?.bodies[
+              m.layer.body_id!
+            ];
+            const body = history.bodies[m.layer.body_id!];
+            const points: Vec3[] = startState ? [startState.position] : [];
+            if (body)
+              for (let i = 0; i < history.times.length; i++) {
+                if (history.times[i] > start && history.times[i] < p.time)
+                  points.push(body.positions_km[i]);
+              }
+            points.push(state.position);
+            const anchor = fromKm(points[0]);
+            const segments: number[] = [];
+            for (let i = 1; i < points.length; i++) {
+              if (
+                Math.hypot(...points[i].map((x, j) => x - points[i - 1][j])) <
+                1e-6
+              )
+                continue;
+              for (const point of [points[i - 1], points[i]])
+                segments.push(
+                  point[0] / AU_KM - anchor.x,
+                  point[1] / AU_KM - anchor.y,
+                  point[2] / AU_KM - anchor.z,
+                );
+            }
+            m.trail.position.copy(anchor);
+            writeTrail(m.trail, m.buffer, segments, m.layer.color);
+            m.trailTime = p.time;
+            m.trailSeconds = p.trailSeconds;
+          }
           const lod = m.visual.update(
             state,
             snapshot.sun,
             camera,
             height,
             !!m.layer.showMeridian,
+            m.layer.glowSize ?? DEFAULT_GLOW_SIZE,
           );
           host.current!.dataset[m.layer.body_id! + "Lod"] = lod;
           if (m.layer.showLabel)
@@ -721,6 +853,19 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
         for (const body of Object.values(snapshot.bodies))
           if (body)
             bound = Math.max(bound, Math.hypot(...body.position) / AU_KM);
+      if (snapshot)
+        for (const layer of props.layers) {
+          const state = layer.body_id && snapshot.bodies[layer.body_id];
+          if (state && layer.visible && layer.showTrack) {
+            for (const point of osculatingPlanetOrbit(
+              state.position,
+              state.velocity,
+              snapshot.sun,
+              snapshot.sunVelocity,
+            ))
+              bound = Math.max(bound, Math.hypot(...point) / AU_KM);
+          }
+        }
       if (props.conic)
         for (const p of props.conic.points)
           bound = Math.max(bound, Math.hypot(...p) / AU_KM);
@@ -747,7 +892,15 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
       if (props.axes) r.content.add(new THREE.AxesHelper(bound * 0.4));
       if (props.conic)
         r.content.add(
-          curveLines(props.conic.points, new Set(), "#f2cb77", bound, 0.7),
+          curveLines(
+            props.conic.points,
+            new Set(),
+            "#f2cb77",
+            bound,
+            0.7,
+            props.layers.find((l) => l.id === props.selected)?.lineWidth ??
+              DEFAULT_LINE_WIDTH,
+          ),
         );
       for (const layer of props.layers.filter((l) => l.visible)) {
         if (layer.kind === "planet") {
@@ -758,18 +911,29 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
             map,
           );
           r.content.add(visual.root);
-          r.planets.push({ layer, visual, label: makeLabel(layer) });
-          const body = props.planetWindow?.bodies[layer.body_id!];
-          if (layer.showTrack && body)
-            r.content.add(
-              curveLines(
-                body.positions_km,
+          const orbit = layer.showTrack
+            ? curveLines(
+                [],
                 new Set(),
                 layer.color,
                 bound,
                 0.45,
-              ),
-            );
+                layer.lineWidth ?? DEFAULT_LINE_WIDTH,
+              )
+            : null;
+          if (orbit) r.content.add(orbit);
+          const { trail, buffer } = createTrail(
+            layer.lineWidth ?? DEFAULT_LINE_WIDTH,
+          );
+          r.content.add(trail);
+          r.planets.push({
+            layer,
+            visual,
+            orbit,
+            trail,
+            buffer,
+            label: makeLabel(layer),
+          });
           continue;
         }
         const ds = props.datasets.find((d) => d.id === layer.dataset_id);
@@ -784,6 +948,7 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
               layer.color,
               bound,
               layer.id === props.selected ? 0.65 : 0.35,
+              layer.lineWidth ?? DEFAULT_LINE_WIDTH,
             ),
           );
         const point = new THREE.Sprite(
@@ -797,26 +962,9 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
             blending: THREE.AdditiveBlending,
           }),
         );
-        point.scale.setScalar(layer.id === props.selected ? 0.022 : 0.016);
         r.content.add(point);
-        const buffer = new Float32Array(4096 * 6),
-          geo = new THREE.BufferGeometry();
-        geo.setAttribute(
-          "position",
-          new THREE.BufferAttribute(buffer, 3).setUsage(THREE.DynamicDrawUsage),
-        );
-        geo.setAttribute(
-          "color",
-          new THREE.BufferAttribute(new Float32Array(4096 * 6), 3),
-        );
-        geo.setDrawRange(0, 0);
-        const trail = new THREE.LineSegments(
-          geo,
-          new THREE.LineBasicMaterial({
-            vertexColors: true,
-            transparent: true,
-            opacity: 0.95,
-          }),
+        const { trail, buffer } = createTrail(
+          layer.lineWidth ?? DEFAULT_LINE_WIDTH,
         );
         trail.position.copy(fromKm(ds.samples[0].position_km));
         trail.frustumCulled = false;
@@ -858,6 +1006,7 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
       props.grid,
       props.conic,
       props.planetWindow,
+      props.planetTrails,
       props.system.center,
       props.system.frame,
     ]);
@@ -913,7 +1062,7 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
           const ctx = canvas.getContext("2d")!,
             ratio = r.renderer.getPixelRatio();
           ctx.drawImage(source, 0, 0);
-          ctx.font = String(13 * ratio) + "px sans-serif";
+          ctx.font = String(13 * ratio) + 'px "Noto Sans SC", sans-serif';
           ctx.fillStyle = "#d5ddeb";
           latest.current.overlay.forEach((line, i) =>
             ctx.fillText(line, 24 * ratio, (30 + i * 23) * ratio),

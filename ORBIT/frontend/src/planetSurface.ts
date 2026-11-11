@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import type { BodyId, PlanetState, Vec3 } from "./types";
+import { DEFAULT_GLOW_SIZE } from "./types";
 export const AU_KM = 149597870.7;
 const vertex = `
   varying vec2 vUv;
@@ -165,6 +166,7 @@ export class PlanetVisual {
     camera: THREE.PerspectiveCamera,
     height: number,
     showMeridian: boolean,
+    glowSize = DEFAULT_GLOW_SIZE,
   ) {
     this.root.position.fromArray(state.position).divideScalar(AU_KM);
     this.body.quaternion.fromArray(state.quaternion);
@@ -195,6 +197,10 @@ export class PlanetVisual {
     this.surface.material.uniforms.uOpacity.value = blend;
     this.glow.visible = blend < 0.999;
     this.glow.material.opacity = (1 - blend) * 0.9;
+    this.glow.scale.setScalar(
+      (glowSize * 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) /
+        Math.max(1, height),
+    );
     this.meridian.visible = showMeridian && this.id === "earth" && blend > 0.5;
     if (this.ring) {
       this.ring.visible = blend > 0.001;

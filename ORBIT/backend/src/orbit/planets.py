@@ -42,12 +42,14 @@ class WindowRequest(StrictModel):
     reference_tai: str = Field(max_length=40)
     start_s: float
     end_s: float
-    step_s: float = Field(default=3600, ge=60, le=3600)
+    step_s: float = Field(default=3600, ge=60, le=21600)
+    history: bool = False
 
     @model_validator(mode="after")
     def bounded_window(self):
-        if self.end_s <= self.start_s or self.end_s-self.start_s > 120*86400 or (self.end_s-self.start_s)/self.step_s > 3000:
-            raise ValueError("星历窗口需为正，至多 120 天、3,001 个采样点")
+        max_days = 370 if self.history else 120
+        if self.end_s <= self.start_s or self.end_s-self.start_s > max_days*86400 or (self.end_s-self.start_s)/self.step_s > 3000 or (not self.history and self.step_s > 3600):
+            raise ValueError(f"星历窗口需为正，至多 {max_days} 天、3,001 个采样点；实时窗口步长不超过一小时")
         if len(set(self.body_ids)) != len(self.body_ids):
             raise ValueError("行星不能重复")
         return self

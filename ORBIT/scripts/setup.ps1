@@ -20,5 +20,5 @@ try {
         & npm run build
         if ($LASTEXITCODE -ne 0) { throw 'Building the frontend failed.' }
     } finally { Pop-Location }
-    Write-Host 'ORBIT is ready. Run scripts/start.ps1, then open http://127.0.0.1:8765.'
+    Write-Host 'ORBIT is ready. Run scripts/start.ps1 to open the desktop window (WebView2 Runtime required).'
 } finally { Pop-Location }

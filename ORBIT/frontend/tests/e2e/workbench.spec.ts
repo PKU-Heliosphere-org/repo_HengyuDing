@@ -86,10 +86,10 @@ test("sample import, explicit conflict, playback, hypothesis and portable projec
 
 test("incompatible center cannot be silently overlaid", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "导入 CSV", exact: true }).click();
+  await page.getByRole("button", { name: "导入 CSV / XLSX", exact: true }).click();
   const csv =
     "epoch,a,e,i,raan,arg_periapsis,true_anomaly\n2026-01-01T00:00:00Z,7000,0.1,30,10,20,0\n";
-  await page.getByLabel("选择CSV").setInputFiles({
+  await page.getByLabel("选择CSV或XLSX").setInputFiles({
     name: "one.csv",
     mimeType: "text/csv",
     buffer: Buffer.from(csv),
@@ -98,7 +98,7 @@ test("incompatible center cannot be silently overlaid", async ({ page }) => {
   await page.getByRole("button", { name: "运行预检" }).click();
   await page.getByRole("button", { name: "添加到场景" }).click();
   await page.getByRole("button", { name: "导入数据", exact: true }).click();
-  await page.getByLabel("选择CSV").setInputFiles({
+  await page.getByLabel("选择CSV或XLSX").setInputFiles({
     name: "two.csv",
     mimeType: "text/csv",
     buffer: Buffer.from(csv),

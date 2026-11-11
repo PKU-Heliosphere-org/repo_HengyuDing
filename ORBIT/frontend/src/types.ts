@@ -67,6 +67,8 @@ export type Sample = {
 export type Dataset = {
   id: string;
   filename: string;
+  source_format?: "csv" | "xlsx";
+  worksheet?: string | null;
   metadata: Metadata;
   reference_tai: string;
   samples: Sample[];
@@ -95,12 +97,16 @@ export type Hypothesis = {
   radius_km: number;
   request_version: number;
 };
+export const DEFAULT_GLOW_SIZE = 24;
+export const DEFAULT_LINE_WIDTH = 3;
 export type Layer = {
   id: string;
   dataset_id?: string;
   kind: "dataset" | "hypothesis" | "planet";
   body_id?: BodyId;
   showMeridian?: boolean;
+  glowSize?: number;
+  lineWidth?: number;
   name: string;
   color: string;
   visible: boolean;
@@ -121,6 +127,9 @@ export type Decisions = {
 export type Inspection = {
   id: string;
   filename: string;
+  source_format?: "csv" | "xlsx";
+  worksheet?: string | null;
+  worksheets?: string[];
   headers: string[];
   mapping: Record<string, string>;
   input_rows: number;
@@ -227,4 +236,5 @@ export type PlanetState = {
 export type PlanetSnapshot = {
   bodies: Partial<Record<BodyId, PlanetState>>;
   sun: Vec3;
+  sunVelocity: Vec3;
 };

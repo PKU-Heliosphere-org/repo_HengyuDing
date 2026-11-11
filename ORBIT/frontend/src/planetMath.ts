@@ -125,5 +125,63 @@ export function planetSnapshot(
       dt,
       alpha,
     ),
+    sunVelocity: hermiteVelocity(
+      window.sun_positions_km[left],
+      window.sun_velocities_km_s[left],
+      window.sun_positions_km[right],
+      window.sun_velocities_km_s[right],
+      dt,
+      alpha,
+    ),
   };
+}
+
+// DE440 solar GM (km^3/s^2), matching backend.models.CENTERS['sun'].
+export const SOLAR_MU = 132712440041.279419;
+export function osculatingPlanetOrbit(
+  position: Vec3,
+  velocity: Vec3,
+  sun: Vec3,
+  sunVelocity: Vec3,
+  count = 1024,
+) {
+  const r = position.map((x, i) => x - sun[i]) as Vec3;
+  const v = velocity.map((x, i) => x - sunVelocity[i]) as Vec3;
+  const cross = (a: Vec3, b: Vec3): Vec3 => [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+  const radius = Math.hypot(...r),
+    h = cross(r, v),
+    hLength = Math.hypot(...h);
+  if (!radius || !hLength) return [];
+  const vxh = cross(v, h);
+  const eccentricity = vxh.map((x, i) => x / SOLAR_MU - r[i] / radius) as Vec3;
+  const e = Math.hypot(...eccentricity),
+    p = (hLength * hLength) / SOLAR_MU;
+  if (!Number.isFinite(e) || e >= 1) return []; // Never invent a closed hyperbola.
+  const periapsis = (
+    e > 1e-10 ? eccentricity.map((x) => x / e) : r.map((x) => x / radius)
+  ) as Vec3;
+  const transverse = cross(h.map((x) => x / hLength) as Vec3, periapsis);
+  const anomaly = Math.atan2(
+    r.reduce((sum, x, i) => sum + x * transverse[i], 0),
+    r.reduce((sum, x, i) => sum + x * periapsis[i], 0),
+  );
+  const points: Vec3[] = [];
+  for (let j = 0; j < count; j++) {
+    const nu = anomaly + (2 * Math.PI * j) / count,
+      c = Math.cos(nu),
+      s = Math.sin(nu),
+      distance = p / (1 + e * c);
+    points.push(
+      periapsis.map(
+        (x, i) => sun[i] + distance * (x * c + transverse[i] * s),
+      ) as Vec3,
+    );
+  }
+  points[0] = [...position];
+  points.push([...points[0]]);
+  return points;
 }

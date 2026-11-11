@@ -173,7 +173,7 @@
 }
 .planet-type {
   color: #6c8b94;
-  font-family: monospace;
+  font-family: var(--font-ui);
   font-size: 9px;
   letter-spacing: 1px;
 }
@@ -292,4 +292,30 @@
   .planet-dialog > footer {
     padding: 12px 24px;
   }
+}
+.appearance-controls {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0;
+}
+.appearance-controls label {
+  display: grid;
+  grid-template-columns: 60px minmax(50px, 1fr) 42px;
+  align-items: center;
+  gap: 7px;
+  color: #9baec2;
+  font-size: 11px;
+}
+.appearance-controls input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.appearance-controls output {
+  text-align: right;
+  color: #d3dce7;
+  font-variant-numeric: tabular-nums;
 }

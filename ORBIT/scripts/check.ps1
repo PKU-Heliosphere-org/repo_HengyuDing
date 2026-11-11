@@ -14,7 +14,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' }
         if ($Browser) {
             $env:ORBIT_TEST_URL = "http://127.0.0.1:$Port"
-            # Start scripts/start.ps1 in another terminal before this check.
+            # Start scripts/start.ps1 -Browser -Port <Port> in another terminal first.
             $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $projectRoot '.cache/ms-playwright'
             & npx playwright install chromium
             if ($LASTEXITCODE -ne 0) { throw 'Browser installation failed.' }

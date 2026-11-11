@@ -84,6 +84,7 @@ def test_planet_only_project_and_camera_roundtrip_without_csv():
     client=TestClient(app)
     layer={'id':'planet-earth','kind':'planet','body_id':'earth','name':'地球','color':'#72b8ed','visible':True,'showTrack':False,'showTrail':False,'showLabel':True,'showMeridian':True}
     state={'layers':[layer],'selected':'planet-earth','clock':{'base_tai':'2028-01-30T12:00:37','time':0,'speed':3600,'start':0,'end':86400},'axes':True,'grid':False,'radius_km':1e8,'trail_s':86400,'scene':{'center':'sun','frame':'J2000'},'stars':True,'camera':{'position_km':[1e8,2e8,10000],'target_km':[1e8,2e8,0],'up':[0,0,1],'follow_id':'planet-earth'}}
+    layer.update(glowSize=24,lineWidth=3.5)
     response=client.post('/api/v1/projects/export',json={'dataset_ids':[],'state':state})
     assert response.status_code==200
     project=response.json();assert project['schema_version']==2 and project['datasets']==[]
@@ -91,3 +92,18 @@ def test_planet_only_project_and_camera_roundtrip_without_csv():
     assert restored.status_code==200 and restored.json()['state']==state
     project['state']['camera']['position_km']=project['state']['camera']['target_km'][:]
     assert client.post('/api/v1/projects/import',files={'file':('bad-camera.json',json.dumps(project).encode())}).status_code==422
+    for key,bad in [('lineWidth',0),('lineWidth',9),('lineWidth',True),('glowSize',49),('glowSize','12')]:
+        old=layer[key]
+        layer[key]=bad
+        assert client.post('/api/v1/projects/export',json={'dataset_ids':[],'state':state}).status_code==422
+        layer[key]=old
+
+
+def test_history_window_covers_a_year_without_relaxing_live_window_limits(kernels):
+    req=WindowRequest(reference_tai='2026-01-01T00:00:37',body_ids=['mercury'],start_s=-365*86400,end_s=86400,step_s=14400,history=True)
+    result=window(req)
+    assert result['times'][0]==-365*86400 and result['times'][-1]==86400
+    assert len(result['times'])<=3001
+    assert np.isfinite(result['bodies']['mercury']['positions_km']).all()
+    with pytest.raises(ValueError):
+        WindowRequest.model_validate({**req.model_dump(),'history':False})

@@ -9,7 +9,8 @@ description = "Local orbital element visualization and geometric analysis"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1", "uvicorn>=0.30,<1", "pydantic>=2.9,<3",
-  "numpy>=1.26,<3", "astropy>=6.1,<8", "python-multipart>=0.0.18,<1", "spiceypy>=8,<9"
+  "numpy>=1.26,<3", "astropy>=6.1,<8", "python-multipart>=0.0.18,<1", "spiceypy>=8,<9",
+  "pywebview>=6.2,<7; sys_platform == 'win32'", "openpyxl>=3.1.5,<4"
 ]
 
 [project.optional-dependencies]

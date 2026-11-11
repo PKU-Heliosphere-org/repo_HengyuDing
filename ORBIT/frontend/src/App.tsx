@@ -30,6 +30,7 @@ import {
   X,
 } from "lucide-react";
 import { api, download, post } from "./api";
+import { LayerAppearance } from "./LayerAppearance";
 import { ImportDialog } from "./ImportDialog";
 import { PlanetDialog } from "./PlanetDialog";
 import { PlanetInspector } from "./PlanetInspector";
@@ -44,7 +45,13 @@ import {
   utcInputSeconds,
   utcLabel,
 } from "./time";
-import { defaultMetadata, elementFields, titles } from "./types";
+import {
+  defaultMetadata,
+  elementFields,
+  titles,
+  DEFAULT_GLOW_SIZE,
+  DEFAULT_LINE_WIDTH,
+} from "./types";
 import type {
   Curve,
   Dataset,
@@ -151,6 +158,23 @@ export default function App() {
     leaps,
     catalog,
   );
+  const planetTrailIds = useMemo(
+    () =>
+      layers
+        .filter((l) => l.kind === "planet" && l.visible && l.showTrail)
+        .map((l) => l.body_id!),
+    [layers],
+  );
+  const planetTrails = usePlanetWindow(
+    planetTrailIds,
+    system,
+    base,
+    time,
+    speed,
+    leaps,
+    catalog,
+    trailSeconds,
+  );
   const planetFrame = useMemo(
     () => planetSnapshot(ephemeris.data, time),
     [ephemeris.data, time],
@@ -179,6 +203,10 @@ export default function App() {
     [currentDataset, base, time],
   );
   const sourceSample = current?.sample;
+  const referenceEpoch =
+    currentLayer?.hypothesis?.metadata.reference_epoch ||
+    currentDataset?.metadata.reference_epoch ||
+    "J2000.0 (JD 2451545.0 TT)";
   const currentPlanet = currentLayer?.body_id
     ? planetFrame?.bodies[currentLayer.body_id]
     : undefined;
@@ -300,6 +328,8 @@ export default function App() {
       dataset_id: ds.id,
       kind: "dataset",
       name: ds.metadata.object_name,
+      glowSize: DEFAULT_GLOW_SIZE,
+      lineWidth: DEFAULT_LINE_WIDTH,
       color: PALETTE[layers.length % PALETTE.length],
       visible: true,
       showTrack: true,
@@ -357,10 +387,12 @@ export default function App() {
         name: body.name,
         color: body.color,
         visible: true,
-        showTrack: false,
+        showTrack: true,
         showTrail: false,
         showLabel: true,
         showMeridian: id === "earth",
+        glowSize: DEFAULT_GLOW_SIZE,
+        lineWidth: DEFAULT_LINE_WIDTH,
       };
     });
     setLayers((current) => [...current, ...added]);
@@ -603,6 +635,7 @@ export default function App() {
       dataset_id: currentDataset.id,
       kind: "hypothesis",
       name: `${currentLayer?.name?.slice(0, 110)} · 假设`,
+      glowSize: DEFAULT_GLOW_SIZE,
       color: PALETTE[layers.length % PALETTE.length],
       visible: true,
       showTrack: true,
@@ -674,8 +707,6 @@ export default function App() {
             <span />
           </span>
           <strong>ORBIT</strong>
-          <span className="brand-divider" />
-          <span className="brand-caption">轨道分析工作台</span>
         </a>
         <div className="header-actions">
           <span className="local-badge">
@@ -794,7 +825,7 @@ export default function App() {
               <div className="empty-layers">
                 <span className="small-orbit" />
                 <p>尚未添加对象</p>
-                <span>导入 CSV，构建你的轨道场景</span>
+                <span>导入 CSV / XLSX，构建你的轨道场景</span>
               </div>
             )}
             {layers.map((l, i) => (
@@ -910,6 +941,10 @@ export default function App() {
                         ),
                       )}
                     </div>
+                    <LayerAppearance
+                      layer={currentLayer}
+                      patch={(patch) => patchLayer(currentLayer.id, patch)}
+                    />
                     <div className="metadata-line">
                       <span>
                         {currentDataset.metadata.center === "sun"
@@ -1074,12 +1109,13 @@ export default function App() {
               system={system}
               stars={stars}
               planetWindow={ephemeris.data}
+              planetTrails={planetTrails.data}
               cameraRestore={cameraRestore}
               onFollow={setFollowing}
               onError={setError}
               overlay={[
                 "ORBIT · " + (utc === "—" ? "静态场景" : niceDate(utc)),
-                `${system.center === "earth" ? "地球中心" : "太阳中心"} / ${system.frame} · ${datasets[0]?.metadata.metadata_status === "provisional" ? "CSV 参考系暂用假设" : "场景参考系"}`,
+                `${system.center === "earth" ? "地球中心" : "太阳中心"} / ${system.frame} · ${datasets[0]?.metadata.metadata_status === "provisional" ? "数据参考系暂用假设" : "场景参考系"}`,
                 ...(currentPlanet?.quality === "approximate"
                   ? ["地球姿态近似：UT1≈UTC，极移=0"]
                   : []),
@@ -1095,20 +1131,32 @@ export default function App() {
                   : []),
               ]}
             />
-            <div className="view-corner">
-              <span className="eyebrow">ORBITAL VIEW</span>
-              <span>
-                {layers.length
-                  ? `${system.center === "sun" ? "日心" : "地心"} · ${system.frame}`
-                  : "三维轨道工作空间"}
-              </span>
-            </div>
+            {!layers.length && (
+              <div className="view-corner">
+                <span className="eyebrow">ORBITAL VIEW</span>
+                <span>三维轨道工作空间</span>
+              </div>
+            )}
             {layers.length > 0 ? (
               <>
-                <div className="scene-readout">
-                  <span className="eyebrow">SIMULATION TIME / UTC</span>
-                  <h2>{utc.slice(0, 10)}</h2>
-                  <code>{utc.slice(11, 19)}</code>
+                <div className="scene-readout" aria-label="场景读数">
+                  <div className="simulation-time">
+                    <span className="eyebrow">模拟时间 / UTC</span>
+                    <h2>
+                      <time dateTime={utc}>
+                        {utc === "—"
+                          ? "—"
+                          : `${utc.slice(0, 10)} ${utc.slice(11, 19)}`}
+                      </time>
+                    </h2>
+                  </div>
+                  <div
+                    className="scene-reference"
+                    title={`参考历元：${referenceEpoch}`}
+                  >
+                    {system.center === "sun" ? "太阳中心" : "地球中心"} ·{" "}
+                    {system.frame}
+                  </div>
                   {distance != null && (
                     <dl>
                       <div>
@@ -1154,10 +1202,6 @@ export default function App() {
                     ))}
                 </div>
                 <div className="scene-bottom-note">
-                  <span>
-                    <i />
-                    行星采用真实半径 · 远景光点增强 · 距离线性比例
-                  </span>
                   <span>
                     {currentLayer?.kind === "planet" && !currentPlanet
                       ? "行星位置读取中"
@@ -1209,7 +1253,7 @@ export default function App() {
                     }}
                   >
                     <Upload size={15} />
-                    导入 CSV
+                    导入 CSV / XLSX
                   </button>
                   <button
                     className="quiet"
@@ -1282,13 +1326,21 @@ export default function App() {
               </Tool>
             </div>
           </section>
-          {(ephemeris.loading || ephemeris.error) && (
+          {(ephemeris.loading ||
+            ephemeris.error ||
+            planetTrails.loading ||
+            planetTrails.error) && (
             <div
               className={
-                "ephemeris-banner " + (ephemeris.error ? "failed" : "")
+                "ephemeris-banner " +
+                (ephemeris.error || planetTrails.error ? "failed" : "")
               }
             >
-              {ephemeris.error || "正在读取本地星历…"}
+              {ephemeris.error ||
+                planetTrails.error ||
+                (planetTrails.loading
+                  ? "正在读取行星尾迹…"
+                  : "正在读取本地星历…")}
             </div>
           )}
           <section className="timeline" aria-label="时间轴">
@@ -1319,6 +1371,7 @@ export default function App() {
                   曲线半径{" "}
                   <input
                     aria-label="曲线显示半径AU"
+                    title="密切轨道和参数预览曲线的显示截断半径，以中心天体为原点；不改变轨道数据。"
                     type="number"
                     min="0.00001"
                     step="0.5"
@@ -1507,7 +1560,7 @@ export default function App() {
             .reduce((sum, d) => sum + d.samples.length, 0)
             .toLocaleString()}{" "}
           采样点{planetIds.length > 0 ? " / " + planetIds.length + " 行星" : ""}
-          <span className="status-separator">/</span>CSV 无时间传播
+          <span className="status-separator">/</span>导入数据无时间传播
           <span className="status-separator">/</span>WebGL2
         </span>
       </footer>
@@ -1556,14 +1609,16 @@ export default function App() {
             <header>
               <div>
                 <span className="eyebrow">GETTING STARTED</span>
-                <h2>从一份 CSV 开始</h2>
+                <h2>从一份星历表开始</h2>
               </div>
               <button aria-label="关闭说明" onClick={() => setHelp(false)}>
                 <X size={18} />
               </button>
             </header>
             <ol>
-              <li>导入 CSV，选择中心天体、坐标系、根数历元和时间体系。</li>
+              <li>
+                导入 CSV / XLSX，选择中心天体、坐标系、根数历元和时间体系。
+              </li>
               <li>
                 运行预检。确认完全重复去重，逐组选取冲突记录，再次预检后添加。
               </li>
@@ -1576,7 +1631,7 @@ export default function App() {
               <li>保存项目包含源数据、元数据与清洗记录；PNG 输出当前场景。</li>
             </ol>
             <p className="hint">
-              空格播放/暂停。左键旋转、滚轮缩放、右键平移，可自由翻转；聚焦与跟随可近距离查看行星。行星使用本地星历，CSV
+              空格播放/暂停。左键旋转、滚轮缩放、右键平移，可自由翻转；聚焦与跟随可近距离查看行星。行星使用本地星历，导入数据
               不含时间传播。样例参考系暂按日心 J2000 赤道面，待核实。时间轴支持
               1972 年起的数据，未来 UTC 使用现有闰秒表。
             </p>

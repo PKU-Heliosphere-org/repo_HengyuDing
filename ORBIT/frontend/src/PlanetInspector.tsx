@@ -1,4 +1,5 @@
 import { Crosshair, Move3D, Settings2 } from "lucide-react";
+import { LayerAppearance } from "./LayerAppearance";
 import type { Layer, PlanetInfo, PlanetState, SceneSystem } from "./types";
 export function PlanetInspector({
   layer,
@@ -40,7 +41,7 @@ export function PlanetInspector({
         </label>
         <div className="layer-style">
           <label>
-            光点颜色
+            颜色
             <input
               aria-label="行星光点颜色"
               type="color"
@@ -48,15 +49,27 @@ export function PlanetInspector({
               onChange={(e) => patch({ color: e.target.value })}
             />
           </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={layer.showLabel}
-              onChange={(e) => patch({ showLabel: e.target.checked })}
-            />
-            标签
-          </label>
+          {(["showTrack", "showTrail", "showLabel"] as const).map((key, i) => (
+            <label
+              key={key}
+              title={
+                [
+                  "当前时刻的日心密切椭圆；地心场景中平移显示",
+                  "过去时段的真实星历路径，时长由底部尾迹菜单设置",
+                  "显示行星名称",
+                ][i]
+              }
+            >
+              <input
+                type="checkbox"
+                checked={layer[key]}
+                onChange={(e) => patch({ [key]: e.target.checked })}
+              />
+              {["轨道", "尾迹", "标签"][i]}
+            </label>
+          ))}
         </div>
+        <LayerAppearance layer={layer} patch={patch} />
         <div className="metadata-line">
           <span>{system.center === "sun" ? "太阳中心" : "地球中心"}</span>
           <span>{system.frame}</span>
@@ -84,14 +97,6 @@ export function PlanetInspector({
           右键平移。聚焦会同时跟随平移，自转仍相对惯性空间显示。
         </p>
         <div className="planet-options">
-          <label>
-            <input
-              type="checkbox"
-              checked={layer.showTrack}
-              onChange={(e) => patch({ showTrack: e.target.checked })}
-            />
-            显示当前时段的星历轨迹
-          </label>
           {layer.body_id === "earth" && (
             <label>
               <input

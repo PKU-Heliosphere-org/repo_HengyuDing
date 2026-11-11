@@ -5,6 +5,14 @@ import math
 import re
 import warnings
 from collections import defaultdict
+from contextlib import ExitStack
+from datetime import date, datetime
+from pathlib import Path
+from zipfile import ZipFile, BadZipFile
+from xml.etree.ElementTree import ParseError
+
+from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 
 import numpy as np
 from astropy.time import Time
@@ -61,6 +69,96 @@ def read_csv(raw):
         raise ImportProblem("无法解析 CSV：" + str(exc))
 
 
+def read_table(raw, filename, worksheet=None, discover=False):
+    suffix = Path(filename).suffix.lower()
+    if suffix == '.xlsx':
+        return read_xlsx(raw, worksheet, discover)
+    if suffix not in {'.csv', ''}:
+        raise ImportProblem("仅支持 CSV 和 XLSX 文件；旧版 XLS 请先另存为 XLSX")
+    if worksheet is not None:
+        raise ImportProblem("CSV 不包含工作表")
+    return {**read_csv(raw), 'source_format': 'csv', 'worksheet': None, 'worksheets': []}
+
+
+def read_xlsx(raw, worksheet=None, discover=False):
+    if len(raw) > MAX_BYTES:
+        raise ImportProblem("XLSX 超过 20 MiB", "file_too_large", status=413)
+    try:
+        with ZipFile(io.BytesIO(raw)) as archive:
+            members = archive.infolist()
+            if len(members) > 10000 or sum(item.file_size for item in members) > 100*1024*1024:
+                raise ImportProblem("XLSX 解压内容超过读取上限，请精简工作簿", "file_too_large", status=413)
+        with ExitStack() as resources:
+            workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=False, keep_links=False)
+            resources.callback(workbook.close)
+            names = [sheet.title for sheet in workbook.worksheets]
+            if not names:
+                raise ImportProblem("XLSX 没有可读取的工作表")
+            if worksheet is None:
+                if len(names) > 1:
+                    if discover:
+                        return {'requires_worksheet': True, 'worksheets': names, 'source_format': 'xlsx'}
+                    raise ImportProblem("XLSX 含多个工作表，请明确选择工作表")
+                worksheet = names[0]
+            if not isinstance(worksheet, str) or worksheet not in names:
+                raise ImportProblem("所选 XLSX 工作表不存在")
+            sheet = workbook[worksheet]
+            if (sheet.max_column or 0) > 256 or (sheet.max_row or 0) > MAX_ROWS+1001:
+                raise ImportProblem("工作表最多支持 256 列、100,000 条数据，请移除多余行列", "too_many_rows", status=413)
+            cached = load_workbook(io.BytesIO(raw), read_only=True, data_only=True, keep_links=False)
+            resources.callback(cached.close)
+            sheet.reset_dimensions()
+            cached[worksheet].reset_dimensions()
+            headers, rows, empty, formula_count = None, [], 0, 0
+            for line, (cells, values) in enumerate(zip(sheet.iter_rows(), cached[worksheet].iter_rows()), 1):
+                if len(cells) > 256:
+                    raise ImportProblem("工作表超过 256 列", "too_many_columns", status=413)
+                if line > MAX_ROWS+1001:
+                    raise ImportProblem("工作表物理行数超过读取上限", "too_many_rows", status=413)
+                strings = []
+                for cell, cached_cell in zip(cells, values):
+                    value = cell.value
+                    if cell.data_type == 'f':
+                        formula_count += 1
+                        value = cached_cell.value
+                        if value is None:
+                            raise ImportProblem(f"工作表 {worksheet} 的 {cell.coordinate} 公式没有缓存结果；请在 Excel 中重新计算并保存，或粘贴为值", details=[{'source_rows':[line]}])
+                    if cell.data_type == 'e' or cached_cell.data_type == 'e':
+                        raise ImportProblem(f"工作表 {worksheet} 的 {cell.coordinate} 包含 Excel 错误值", details=[{'source_rows':[line]}])
+                    if isinstance(value, datetime):
+                        value = value.isoformat()
+                    elif isinstance(value, date):
+                        value = value.isoformat()+'T00:00:00'
+                    strings.append('' if value is None else str(value).strip())
+                if not any(strings):
+                    empty += 1
+                    continue
+                if headers is None:
+                    while strings and not strings[-1]:
+                        strings.pop()
+                    headers = strings
+                    if any(not s for s in headers) or len(set(headers)) != len(headers):
+                        raise ImportProblem("工作表表头为空或存在重复列名", details=[{'source_rows':[line]}])
+                    continue
+                if any(strings[len(headers):]):
+                    raise ImportProblem("工作表存在没有表头的数据列", details=[{'source_rows':[line]}])
+                strings = (strings+['']*len(headers))[:len(headers)]
+                rows.append({'source_row': line, 'values': dict(zip(headers, strings))})
+                if len(rows) > MAX_ROWS:
+                    raise ImportProblem("XLSX 超过 100,000 条数据", "too_many_rows", status=413)
+            if not headers or not rows:
+                raise ImportProblem(f"工作表 {worksheet} 没有数据行")
+            mapping = {field: field if field in headers else alias for field, alias in ALIASES.items() if field in headers or alias in headers}
+            notes = [f"使用 {formula_count} 个 Excel 公式缓存结果，未重新计算公式；请确认源文件已重新计算并保存。"] if formula_count else []
+            return {'headers':headers, 'rows':rows, 'empty_rows':empty, 'mapping':mapping,
+                    'sha256':hashlib.sha256(raw).hexdigest(), 'source_format':'xlsx', 'worksheet':worksheet,
+                    'worksheets':names, 'warnings':notes, 'audit':[f"XLSX 工作表：{worksheet}"]}
+    except ImportProblem:
+        raise
+    except (BadZipFile, ValueError, KeyError, OSError, TypeError, EOFError, ParseError, InvalidFileException) as exc:
+        raise ImportProblem("无法读取 XLSX；请确认文件完整、未加密，并可由 Excel 正常打开", "invalid_workbook") from exc
+
+
 def epoch_string(value, scale):
     s = value.strip()
     slash = re.fullmatch(r"(\d{4})/(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?", s)
@@ -82,7 +180,7 @@ def epoch_string(value, scale):
 
 def validate(parsed, request: ImportRequest):
     meta, mapping, decisions = request.metadata, request.mapping, request.decisions
-    problems, notes, warnings_list = [], [], []
+    problems, notes, warnings_list = [], list(parsed.get('audit', [])), list(parsed.get('warnings', []))
 
     def issue(message, rows=None, field=None):
         problems.append({"message": message, "source_rows": rows or [], "field": field})

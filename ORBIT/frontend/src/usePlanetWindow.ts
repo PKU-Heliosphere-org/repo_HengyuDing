@@ -17,6 +17,7 @@ export function usePlanetWindow(
   speed: number,
   leaps: Leap[],
   catalog: PlanetCatalog | null,
+  historySeconds = 0,
 ) {
   const [data, setData] = useState<PlanetWindow | null>(null),
     [loading, setLoading] = useState(false),
@@ -27,6 +28,7 @@ export function usePlanetWindow(
     system.center,
     system.frame,
     [...ids].sort().join(","),
+    historySeconds,
   ].join("|");
   const storedKey = useRef("");
   useEffect(() => {
@@ -51,15 +53,21 @@ export function usePlanetWindow(
       ),
       maximum = utcInputSeconds(catalog.max_utc.replace(/Z$/, ""), base, leaps);
     const valid = storedKey.current === key && data;
-    const span = Math.max(4 * 86400, Math.min(120 * 86400, speed * 20));
+    const lead = Math.min(2 * 86400, Math.max(3600, speed * 20));
+    const span = historySeconds
+      ? historySeconds + lead * 2
+      : Math.max(4 * 86400, Math.min(120 * 86400, speed * 20));
     const margin = Math.min(span * 0.15, Math.max(3600, speed * 4));
     const covered =
-      valid && time >= data.times[0] && time <= data.times.at(-1)!;
+      valid &&
+      Math.max(minimum, time - historySeconds) >= data.times[0] &&
+      time <= data.times.at(-1)!;
     const nearEdge =
       covered &&
       ((time > data.times.at(-1)! - margin &&
         data.times.at(-1)! < maximum - 1) ||
-        (time < data.times[0] + margin && data.times[0] > minimum + 1));
+        (time - historySeconds < data.times[0] + margin &&
+          data.times[0] > minimum + 1));
     const failureKey = key + "|" + Math.floor(time / 3600);
     if (state.pending || state.failed === failureKey || (covered && !nearEdge))
       return;
@@ -69,7 +77,9 @@ export function usePlanetWindow(
     }
     const start = Math.max(
       minimum,
-      Math.floor((time - span * 0.3) / 3600) * 3600,
+      Math.floor(
+        (time - (historySeconds ? historySeconds + lead : span * 0.3)) / 3600,
+      ) * 3600,
     );
     const end = Math.min(maximum, start + span);
     const version = ++state.version;
@@ -82,7 +92,10 @@ export function usePlanetWindow(
       reference_tai: base,
       start_s: start,
       end_s: end,
-      step_s: 3600,
+      step_s: historySeconds
+        ? Math.max(3600, Math.ceil((end - start) / 2600 / 3600) * 3600)
+        : 3600,
+      history: !!historySeconds,
     })
       .then((next) => {
         if (version !== request.current.version) return;

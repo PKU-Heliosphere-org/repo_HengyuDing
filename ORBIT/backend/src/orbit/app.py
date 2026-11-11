@@ -10,13 +10,13 @@ from pathlib import Path
 from astropy.time import Time
 import erfa
 from datetime import datetime, timezone
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .importer import MAX_BYTES, ImportProblem, read_csv, validate
+from .importer import MAX_BYTES, ImportProblem, read_table, validate
 from .mechanics import conic
 from .models import CENTERS, ImportRequest, PreviewRequest, StrictModel
 from . import planets
@@ -52,18 +52,21 @@ def get_entry(table, key):
     return table[key]
 
 
-def add_import(raw, filename):
+def add_import(raw, filename, worksheet=None):
     now = time.monotonic()
     for key in list(imports):
         if now-imports[key]["created"] > 3600:
             del imports[key]
     if len(imports) >= 16:
         raise ImportProblem("待处理导入过多，请完成或取消已有导入", "capacity", status=409)
-    parsed = read_csv(raw)
+    parsed = read_table(raw, filename, worksheet, discover=True)
+    if parsed.get('requires_worksheet'):
+        return {**parsed, 'filename':filename}
     key = str(uuid.uuid4())
     imports[key] = {"parsed": parsed, "raw": raw, "filename": filename, "created": now}
     return {"id": key, "filename": filename, "headers": parsed["headers"], "mapping": parsed["mapping"],
-            "input_rows": len(parsed["rows"]), "preview": parsed["rows"][:5], "sha256": parsed["sha256"]}
+            "input_rows": len(parsed["rows"]), "preview": parsed["rows"][:5], "sha256": parsed["sha256"],
+            'source_format':parsed['source_format'], 'worksheet':parsed['worksheet'], 'worksheets':parsed['worksheets']}
 
 
 def public_dataset(ds):
@@ -101,9 +104,9 @@ def sample():
 
 
 @app.post("/api/v1/imports/inspect")
-async def inspect(file: UploadFile = File(...)):
+async def inspect(file: UploadFile = File(...), worksheet: str | None = Form(None)):
     raw = await file.read(MAX_BYTES+1)
-    return add_import(raw, Path(file.filename or "orbit.csv").name)
+    return add_import(raw, Path(file.filename or "orbit.csv").name, worksheet)
 
 
 @app.delete("/api/v1/imports/{key}")
@@ -126,6 +129,7 @@ def commit_import(key: str, body: ImportRequest):
     if not report["ok"]:
         raise ImportProblem("请先处理预检中的问题", "unresolved_import", report["issues"])
     ds.update({"id": str(uuid.uuid4()), "filename": entry["filename"], "source_base64": base64.b64encode(entry["raw"]).decode("ascii")})
+    ds.update(source_format=entry['parsed']['source_format'], worksheet=entry['parsed']['worksheet'])
     datasets[ds["id"]] = ds
     del imports[key]
     return public_dataset(ds)
@@ -196,6 +200,9 @@ def validate_project_state(state, dataset_map):
         for flag in ["visible", "showTrack", "showTrail", "showLabel"]:
             if not isinstance(layer.get(flag), bool):
                 raise ImportProblem("图层开关无效")
+        for key, minimum, maximum in [("glowSize", 2, 48), ("lineWidth", 0.5, 8)]:
+            if key in layer and (type(layer[key]) not in (int, float) or not math.isfinite(layer[key]) or not minimum <= layer[key] <= maximum):
+                raise ImportProblem("图层光点大小或轨道线宽超出有效范围")
         if layer["kind"] == "planet":
             has_planets = True
             if layer.get("body_id") not in planets.BODIES:
@@ -270,7 +277,8 @@ def export_project(body: ExportRequest):
     state = validate_project_state(body.state, {d["id"]:d for d in chosen})
     data = {"schema_version": 2, "app_version": __version__, "state": state,
             "datasets": [{"id": d["id"], "filename": d["filename"], "source_base64": d["source_base64"],
-                          "source_sha256": d["source_sha256"], "import_request": d["import_request"]} for d in chosen]}
+                          "source_sha256": d["source_sha256"], "import_request": d["import_request"],
+                          'source_format':d.get('source_format','csv'), 'worksheet':d.get('worksheet')} for d in chosen]}
     encoded = finite_json(data).encode("utf-8")
     if len(encoded) > 100*1024*1024:
         raise ImportProblem("项目超过 100 MiB", "file_too_large", status=413)
@@ -296,10 +304,14 @@ async def import_project(file: UploadFile = File(...)):
             if hashlib.sha256(source).hexdigest() != item["source_sha256"]:
                 raise ImportProblem("项目源文件校验失败")
             req = ImportRequest.model_validate(item["import_request"])
-            report, ds = validate(read_csv(source), req)
+            parsed = read_table(source, str(item['filename']), item.get('worksheet'))
+            if item.get('source_format', parsed['source_format']) != parsed['source_format']:
+                raise ImportProblem("项目源文件格式与文件名不一致")
+            report, ds = validate(parsed, req)
             if not report["ok"]:
                 raise ImportProblem("项目数据未通过重新校验", details=report["issues"])
             ds.update({"id": item["id"], "filename": str(item["filename"]), "source_base64": item["source_base64"]})
+            ds.update(source_format=parsed['source_format'], worksheet=parsed['worksheet'])
             rebuilt[ds["id"]] = ds
         state = validate_project_state(project["state"], rebuilt)
         centers = {(d["metadata"]["center"], d["metadata"]["frame"]) for d in rebuilt.values()}
