@@ -30,12 +30,16 @@ import {
   X,
 } from "lucide-react";
 import { api, download, post } from "./api";
+import { TimelinePanel } from "./TimelinePanel";
 import { LayerAppearance } from "./LayerAppearance";
 import { ImportDialog } from "./ImportDialog";
 import { PlanetDialog } from "./PlanetDialog";
 import { PlanetInspector } from "./PlanetInspector";
 import { usePlanetWindow } from "./usePlanetWindow";
+import { useRenderCache } from "./useRenderCache";
+import { RenderCachePanel } from "./RenderCachePanel";
 import { planetSnapshot } from "./planetMath";
+import { elementsFromState } from "./stateVector";
 import { OrbitScene } from "./Scene";
 import type { SceneHandle } from "./Scene";
 import {
@@ -109,10 +113,25 @@ export default function App() {
   const [playing, setPlaying] = useState(false);
   const [start, setStart] = useState(0);
   const [end, setEnd] = useState(0);
+  const [cacheEnabled, setCacheEnabled] = useState(false);
+  const [cacheRange, setCacheRange] = useState<{
+    base: string;
+    start: number;
+    end: number;
+  } | null>(null);
+  const validCacheRange =
+    cacheRange?.base === base &&
+    Math.min(end, cacheRange.end) > Math.max(start, cacheRange.start);
+  const cacheFrom = validCacheRange
+    ? Math.max(start, cacheRange!.start)
+    : start;
+  const cacheTo = validCacheRange ? Math.min(end, cacheRange!.end) : end;
+  const playbackStart = cacheEnabled ? cacheFrom : start;
+  const playbackEnd = cacheEnabled ? cacheTo : end;
   const [axes, setAxes] = useState(false);
   const [grid, setGrid] = useState(true);
   const [fit, setFit] = useState(0);
-  const [radius, setRadius] = useState(3 * AU);
+  const radius = 100 * AU;
   const [trailSeconds, setTrailSeconds] = useState(60 * 86400);
   const [importing, setImporting] = useState(false);
   const [initialFile, setInitialFile] = useState<File>();
@@ -138,7 +157,7 @@ export default function App() {
   });
   const [catalog, setCatalog] = useState<PlanetCatalog | null>(null);
   const [planetDialog, setPlanetDialog] = useState(false);
-  const [stars, setStars] = useState(false);
+  const [stars, setStars] = useState(true);
   const [cameraRestore, setCameraRestore] = useState<CameraState | null>(null);
   const [following, setFollowing] = useState<string | null>(null);
   const planetIds = useMemo(
@@ -157,6 +176,8 @@ export default function App() {
     speed,
     leaps,
     catalog,
+    0,
+    !cacheEnabled,
   );
   const planetTrailIds = useMemo(
     () =>
@@ -174,16 +195,32 @@ export default function App() {
     leaps,
     catalog,
     trailSeconds,
+    !cacheEnabled,
   );
+  const renderCache = useRenderCache(
+    cacheEnabled,
+    planetIds,
+    system,
+    base,
+    cacheFrom,
+    cacheTo,
+    planetTrailIds.length ? trailSeconds : 0,
+    leaps,
+    catalog,
+  );
+  const planetData = cacheEnabled ? renderCache.data : ephemeris.data;
+  const trailData = cacheEnabled ? renderCache.data : planetTrails.data;
   const planetFrame = useMemo(
-    () => planetSnapshot(ephemeris.data, time),
-    [ephemeris.data, time],
+    () => planetSnapshot(planetData, time),
+    [planetData, time],
   );
   const planetBuffer = useRef({
     data: ephemeris.data,
     active: planetIds.length > 0,
   });
-  planetBuffer.current = { data: ephemeris.data, active: planetIds.length > 0 };
+  planetBuffer.current = { data: planetData, active: planetIds.length > 0 };
+  const trailBuffer = useRef(trailData);
+  trailBuffer.current = planetTrailIds.length ? trailData : null;
   const scene = useRef<SceneHandle>(null);
   const openProject = useRef<HTMLInputElement>(null);
   const version = useRef(0);
@@ -210,10 +247,23 @@ export default function App() {
   const currentPlanet = currentLayer?.body_id
     ? planetFrame?.bodies[currentLayer.body_id]
     : undefined;
+  const sourceElements = useMemo(() => {
+    if (!sourceSample || !currentDataset) return null;
+    const mu =
+      currentDataset.metadata.mu_km3_s2 ??
+      (currentDataset.metadata.center === "earth"
+        ? 398600.435507
+        : 132712440041.279419);
+    return elementsFromState(
+      sourceSample.position_km,
+      sourceSample.velocity_km_s,
+      mu,
+    );
+  }, [sourceSample, currentDataset]);
   const displayedElements =
     currentLayer?.kind === "hypothesis"
       ? currentLayer.hypothesis?.elements
-      : sourceSample?.elements;
+      : sourceElements;
   const utc = utcLabel(base, time, leaps);
   const bounds = useMemo(() => {
     if (!base) return [0, 0];
@@ -252,6 +302,15 @@ export default function App() {
     setConic(null);
   }, [selected]);
   useEffect(() => {
+    if (cacheEnabled) {
+      setPlaying(false);
+      setTime((t) => Math.max(cacheFrom, Math.min(cacheTo, t)));
+    }
+  }, [cacheEnabled, cacheFrom, cacheTo]);
+  useEffect(() => {
+    if (cacheEnabled && !renderCache.ready) setPlaying(false);
+  }, [cacheEnabled, renderCache.ready]);
+  useEffect(() => {
     if (!playing) return;
     let frame: number;
     let previous = performance.now();
@@ -267,13 +326,20 @@ export default function App() {
           if (
             buffer.active &&
             (!buffer.data ||
-              Math.min(next, end) < buffer.data.times[0] ||
-              Math.min(next, end) > buffer.data.times.at(-1)!)
+              Math.min(next, playbackEnd) < buffer.data.times[0] ||
+              Math.min(next, playbackEnd) > buffer.data.times.at(-1)!)
           )
             return t;
-          if (next >= end) {
+          // Do not let playback outrun the history window and hide the trail.
+          const history = trailBuffer.current;
+          if (
+            planetTrailIds.length &&
+            (!history || Math.min(next, playbackEnd) > history.times.at(-1)!)
+          )
+            return t;
+          if (next >= playbackEnd) {
             setPlaying(false);
-            return end;
+            return playbackEnd;
           }
           return next;
         });
@@ -282,12 +348,13 @@ export default function App() {
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [playing, speed, end]);
+  }, [playing, speed, playbackEnd, planetTrailIds.length]);
   const togglePlay = useCallback(() => {
-    if (end <= start) return;
-    if (time >= end) setTime(start);
+    if (playbackEnd <= playbackStart || (cacheEnabled && !renderCache.ready))
+      return;
+    if (time >= playbackEnd || time < playbackStart) setTime(playbackStart);
     setPlaying((v) => !v);
-  }, [end, start, time]);
+  }, [playbackEnd, playbackStart, time, cacheEnabled, renderCache.ready]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (
@@ -388,7 +455,7 @@ export default function App() {
         color: body.color,
         visible: true,
         showTrack: true,
-        showTrail: false,
+        showTrail: true,
         showLabel: true,
         showMeridian: id === "earth",
         glowSize: DEFAULT_GLOW_SIZE,
@@ -445,6 +512,8 @@ export default function App() {
     }
     if (!next.length) {
       setPlaying(false);
+      setCacheEnabled(false);
+      setCacheRange(null);
       setBase("");
       setTime(0);
       setStart(0);
@@ -458,6 +527,8 @@ export default function App() {
     )
       return;
     setDatasets([]);
+    setCacheEnabled(false);
+    setCacheRange(null);
     setLayers([]);
     setSelected(null);
     setBase("");
@@ -521,13 +592,15 @@ export default function App() {
         { method: "POST", body },
       );
       const s = restored.state;
+      setCacheEnabled(false);
+      setCacheRange(null);
       setSystem(
         s.scene || {
           center: restored.datasets[0].metadata.center,
           frame: restored.datasets[0].metadata.frame,
         },
       );
-      setStars(s.stars || false);
+      setStars(s.stars ?? true);
       setCameraRestore(s.camera || null);
       setFollowing(s.camera?.follow_id || null);
       if (!s.camera) setFit((v) => v + 1);
@@ -543,7 +616,6 @@ export default function App() {
       setSpeed(s.clock.speed);
       setAxes(s.axes);
       setGrid(s.grid);
-      setRadius(s.radius_km);
       setTrailSeconds(s.trail_s);
       const lo = Math.min(
         ...restored.datasets.map(
@@ -601,8 +673,6 @@ export default function App() {
         : displayedElements!;
       if (Object.values(elements).some((v) => !Number.isFinite(v)))
         throw new Error("请填写完整、有限的轨道根数。");
-      if (!Number.isFinite(radius) || radius <= 0)
-        throw new Error("显示半径必须是正数。");
       const input: Hypothesis = {
         elements,
         metadata: currentDataset.metadata,
@@ -660,7 +730,8 @@ export default function App() {
       direction > 0
         ? currentDataset.samples.find((s) => s.t > local + 1e-6)
         : [...currentDataset.samples].reverse().find((s) => s.t < local - 1e-6);
-    if (found) setTime(Math.max(start, Math.min(end, found.t + offset)));
+    if (found)
+      setTime(Math.max(playbackStart, Math.min(playbackEnd, found.t + offset)));
   }
   function changeRange(which: "start" | "end", value: string) {
     const t = utcInputSeconds(value, base, leaps);
@@ -713,7 +784,7 @@ export default function App() {
             <i />
             本地运行
           </span>
-          <span className="version">v0.2</span>
+          <span className="version">v0.3</span>
           <Tool label="使用说明" onClick={() => setHelp(true)}>
             <CircleHelp size={18} />
           </Tool>
@@ -979,7 +1050,11 @@ export default function App() {
                         ))}
                       </dl>
                     ) : (
-                      <p className="hint">当前时刻无有效采样或处于缺测区段。</p>
+                      <p className="hint">
+                        {sourceSample
+                          ? "该状态为径向运动或接近抛物线，无法使用当前六根数编辑；位置与速度仍保留。"
+                          : "当前时刻无有效采样或处于缺测区段。"}
+                      </p>
                     )}
                     <div className="source-time">
                       <span>根数源历元</span>
@@ -1108,8 +1183,8 @@ export default function App() {
               conic={sceneCurve}
               system={system}
               stars={stars}
-              planetWindow={ephemeris.data}
-              planetTrails={planetTrails.data}
+              planetWindow={planetData}
+              planetTrails={trailData}
               cameraRestore={cameraRestore}
               onFollow={setFollowing}
               onError={setError}
@@ -1181,7 +1256,9 @@ export default function App() {
                                 : null
                               : currentLayer?.kind === "hypothesis"
                                 ? currentLayer.curve?.speed_km_s
-                                : sourceSample?.speed_km_s,
+                                : sourceSample
+                                  ? Math.hypot(...sourceSample.velocity_km_s)
+                                  : undefined,
                             3,
                           )}{" "}
                           <small>km/s</small>
@@ -1326,24 +1403,47 @@ export default function App() {
               </Tool>
             </div>
           </section>
-          {(ephemeris.loading ||
-            ephemeris.error ||
-            planetTrails.loading ||
-            planetTrails.error) && (
-            <div
-              className={
-                "ephemeris-banner " +
-                (ephemeris.error || planetTrails.error ? "failed" : "")
-              }
-            >
-              {ephemeris.error ||
-                planetTrails.error ||
-                (planetTrails.loading
-                  ? "正在读取行星尾迹…"
-                  : "正在读取本地星历…")}
-            </div>
-          )}
-          <section className="timeline" aria-label="时间轴">
+          {!cacheEnabled &&
+            (ephemeris.loading ||
+              ephemeris.error ||
+              planetTrails.loading ||
+              planetTrails.error) && (
+              <div
+                className={
+                  "ephemeris-banner " +
+                  (ephemeris.error || planetTrails.error ? "failed" : "")
+                }
+              >
+                {ephemeris.error ||
+                  planetTrails.error ||
+                  (planetTrails.loading
+                    ? "正在读取行星尾迹…"
+                    : "正在读取本地星历…")}
+              </div>
+            )}
+          <RenderCachePanel
+            enabled={cacheEnabled}
+            disabled={!layers.length || end <= start}
+            onEnabled={(enabled) => {
+              setPlaying(false);
+              setCacheEnabled(enabled);
+            }}
+            start={start}
+            end={end}
+            from={cacheFrom}
+            to={cacheTo}
+            base={base}
+            leaps={leaps}
+            onRange={(from, to) => {
+              setPlaying(false);
+              setCacheRange({ base, start: from, end: to });
+            }}
+            ready={renderCache.ready}
+            progress={renderCache.progress}
+            error={renderCache.error}
+            onRetry={renderCache.retry}
+          />
+          <TimelinePanel>
             <div className="timeline-heading">
               <div>
                 <Activity size={14} />
@@ -1354,9 +1454,10 @@ export default function App() {
               </div>
               <div className="timeline-options">
                 <label>
-                  尾迹{" "}
+                  尾迹时长{" "}
                   <select
                     aria-label="尾迹时长"
+                    title="显示当前时刻之前的历史路径；数据不足时只显示已有部分，缺测处断开。"
                     value={trailSeconds}
                     onChange={(e) => setTrailSeconds(Number(e.target.value))}
                   >
@@ -1366,24 +1467,6 @@ export default function App() {
                       </option>
                     ))}
                   </select>
-                </label>
-                <label>
-                  曲线半径{" "}
-                  <input
-                    aria-label="曲线显示半径AU"
-                    title="密切轨道和参数预览曲线的显示截断半径，以中心天体为原点；不改变轨道数据。"
-                    type="number"
-                    min="0.00001"
-                    step="0.5"
-                    value={Number((radius / AU).toPrecision(8))}
-                    onChange={(e) => {
-                      version.current++;
-                      setRadius(Number(e.target.value) * AU);
-                      setPreview(null);
-                      setConic(null);
-                    }}
-                  />
-                  <span>AU</span>
                 </label>
               </div>
             </div>
@@ -1460,7 +1543,12 @@ export default function App() {
                 disabled={!layers.length || start === end}
                 onChange={(e) => {
                   setPlaying(false);
-                  setTime(Number(e.target.value));
+                  setTime(
+                    Math.max(
+                      playbackStart,
+                      Math.min(playbackEnd, Number(e.target.value)),
+                    ),
+                  );
                 }}
               />
             </div>
@@ -1480,6 +1568,7 @@ export default function App() {
                     !layers.length ||
                     end <= start ||
                     editing ||
+                    (cacheEnabled && !renderCache.ready) ||
                     (planetIds.length > 0 && !planetFrame)
                   }
                   onClick={togglePlay}
@@ -1547,7 +1636,7 @@ export default function App() {
                 </label>
               </div>
             </div>
-          </section>
+          </TimelinePanel>
         </main>
       </div>
       <footer className="statusbar">

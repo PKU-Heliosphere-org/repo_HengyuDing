@@ -15,6 +15,10 @@ test("layer appearance changes rendered pixels and survives project restore", as
   });
   await page.goto("/");
   await page.getByText("本地服务已连接").waitFor();
+  await expect(page.getByRole("button", { name: "星空背景", exact: true })).toHaveClass(/active/);
+  await expect(page.getByLabel("曲线显示半径AU")).toHaveCount(0);
+  expect(await page.locator(".timeline-tracks").evaluate((e) => getComputedStyle(e).scrollbarColor))
+    .toBe("rgb(52, 66, 81) rgba(0, 0, 0, 0)");
   expect(
     await page
       .locator(".app-header")
@@ -62,8 +66,10 @@ test("layer appearance changes rendered pixels and survives project restore", as
     });
   };
   const glow = page.getByLabel("行星光点大小");
-  await expect(glow).toHaveValue("24");
-  await expect(page.getByLabel("轨道线宽", { exact: true })).toHaveValue("3");
+  await expect(glow).toHaveValue("6");
+  await expect(page.getByRole("checkbox", { name: "尾迹", exact: true })).toBeChecked();
+  await page.getByRole("checkbox", { name: "尾迹", exact: true }).uncheck();
+  await expect(page.getByLabel("轨道线宽", { exact: true })).toHaveValue("1");
   await expect(
     page.locator(".planet-inspector .layer-style input[type=checkbox]"),
   ).toHaveCount(3);

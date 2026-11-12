@@ -45,7 +45,9 @@ test("sample import, explicit conflict, playback, hypothesis and portable projec
   await page.getByLabel("编辑e", { exact: true }).fill("0.8");
   // Current sample can be hyperbolic; use a positive a for this elliptic hypothesis.
   await page.getByLabel("编辑a", { exact: true }).fill("240000000");
+  const previewRequest = page.waitForRequest((r) => r.url().endsWith("/orbits/preview"));
   await page.getByRole("button", { name: "计算预览", exact: true }).click();
+  expect((await previewRequest).postDataJSON().radius_km).toBe(100 * 149597870.7);
   await expect(
     page.getByRole("button", { name: "另存假设图层" }),
   ).toBeVisible();
@@ -62,6 +64,8 @@ test("sample import, explicit conflict, playback, hypothesis and portable projec
   await saved.saveAs(projectPath);
   const content = JSON.parse(await fs.readFile(projectPath, "utf8"));
   expect(content.schema_version).toBe(2);
+  expect(content.state.radius_km).toBe(100 * 149597870.7);
+  expect(content.state.stars).toBe(true);
   expect(content.state.layers).toHaveLength(2);
   page.on("dialog", (d) => d.accept());
   await page.getByRole("button", { name: "新建工作台" }).click();

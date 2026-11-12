@@ -35,7 +35,8 @@ test("planet closed orbit and historical trail are independent and portable", as
   const track = page.getByRole("checkbox", { name: "轨道", exact: true });
   const trail = page.getByRole("checkbox", { name: "尾迹", exact: true });
   await expect(track).toBeChecked();
-  await expect(trail).not.toBeChecked();
+  await expect(trail).toBeChecked();
+  await trail.uncheck();
   const countBlue = async () => {
     await page.waitForTimeout(250);
     return page.evaluate(() => {
@@ -112,8 +113,8 @@ test("planet closed orbit and historical trail are independent and portable", as
     showTrack: false,
     showTrail: true,
     showLabel: true,
-    glowSize: 24,
-    lineWidth: 3,
+    glowSize: 6,
+    lineWidth: 1,
   });
   await page.reload();
   await page
@@ -122,7 +123,7 @@ test("planet closed orbit and historical trail are independent and portable", as
   await expect(page.getByText("项目已恢复，采样位置已重新计算")).toBeVisible();
   await expect(trail).toBeChecked();
   await expect(track).not.toBeChecked();
-  await expect(page.getByLabel("行星光点大小")).toHaveValue("24");
-  await expect(page.getByLabel("轨道线宽", { exact: true })).toHaveValue("3");
+  await expect(page.getByLabel("行星光点大小")).toHaveValue("6");
+  await expect(page.getByLabel("轨道线宽", { exact: true })).toHaveValue("1");
   expect(errors).toEqual([]);
 });

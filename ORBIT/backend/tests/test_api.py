@@ -38,6 +38,11 @@ def test_project_roundtrip_recomputes_and_preserves_provenance():
     assert actual['state']==state
     assert actual['datasets'][0]['samples']==ds['samples']
     assert actual['datasets'][0]['metadata']['metadata_status']=='provisional'
+    legacy=deepcopy(project)
+    req=legacy['datasets'][0]['import_request']
+    req.pop('input_type'); req.pop('velocity_source'); req['metadata'].pop('speed_unit')
+    old=client.post('/api/v1/projects/import',files={'file':('legacy.json',json.dumps(legacy).encode())})
+    assert old.status_code==200 and old.json()['datasets'][0]['samples']==ds['samples']
     tampered=deepcopy(project); tampered['datasets'][0]['source_sha256']='bad'
     assert client.post('/api/v1/projects/import',files={'file':('bad.json',json.dumps(tampered).encode())}).status_code==422
     assert len(datasets)==1  # failed open must not destroy the valid workspace

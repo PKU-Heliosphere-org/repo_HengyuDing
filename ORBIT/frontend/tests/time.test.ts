@@ -9,15 +9,7 @@ const sample = (t: number, x: number) =>
     source_rows: [2],
     epoch_utc: "",
     epoch_tai: "",
-    speed_km_s: 0,
-    elements: {
-      a: 7000,
-      e: 0,
-      i: 0,
-      raan: 0,
-      arg_periapsis: 0,
-      true_anomaly: 0,
-    },
+    velocity_km_s: [0, 0, 0],
   }) as Sample;
 describe("sample playback without propagation", () => {
   const samples = [sample(0, 0), sample(10, 100), sample(100, 200)];

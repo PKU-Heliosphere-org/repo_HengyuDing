@@ -15,8 +15,10 @@ export const elementFields = [
   "arg_periapsis",
   "true_anomaly",
 ] as const;
+export const stateFields = ["x", "y", "z", "vx", "vy", "vz"] as const;
+export type InputType = "elements" | "cartesian";
 export const titles: Record<string, string> = {
-  epoch: "根数历元",
+  epoch: "数据历元",
   a: "半长轴 a",
   e: "偏心率 e",
   i: "倾角 i",
@@ -24,6 +26,12 @@ export const titles: Record<string, string> = {
   arg_periapsis: "近心点幅角 ω",
   true_anomaly: "真近点角 ν",
   mean_anomaly: "平近点角 M",
+  x: "位置 X",
+  y: "位置 Y",
+  z: "位置 Z",
+  vx: "速度 VX",
+  vy: "速度 VY",
+  vz: "速度 VZ",
 };
 export type Metadata = {
   object_name: string;
@@ -33,7 +41,8 @@ export type Metadata = {
   epoch_mode: "per_row" | "single";
   single_epoch: string | null;
   time_scale: "UTC" | "TT" | "TDB";
-  length_unit: "km" | "AU";
+  length_unit: "km" | "m" | "AU";
+  speed_unit?: "km/s" | "m/s" | "AU/day" | "AU/s";
   angle_unit: "deg" | "rad";
   mu_km3_s2?: number | null;
   mu_source?: string;
@@ -50,6 +59,7 @@ export const defaultMetadata: Metadata = {
   single_epoch: null,
   time_scale: "UTC",
   length_unit: "km",
+  speed_unit: "km/s",
   angle_unit: "deg",
   metadata_status: "provisional",
   metadata_notes: "参考平面暂按 J2000 赤道面，待核实；UTCG 按 UTC 解释。",
@@ -57,18 +67,19 @@ export const defaultMetadata: Metadata = {
 };
 export type Sample = {
   source_rows: number[];
-  elements: Elements;
   t: number;
   epoch_utc: string;
   epoch_tai: string;
   position_km: Vec3;
-  speed_km_s: number;
+  velocity_km_s: Vec3;
 };
 export type Dataset = {
   id: string;
   filename: string;
   source_format?: "csv" | "xlsx";
   worksheet?: string | null;
+  input_type?: InputType;
+  velocity_source?: "elements" | "provided" | "finite_difference";
   metadata: Metadata;
   reference_tai: string;
   samples: Sample[];
@@ -97,8 +108,10 @@ export type Hypothesis = {
   radius_km: number;
   request_version: number;
 };
-export const DEFAULT_GLOW_SIZE = 24;
-export const DEFAULT_LINE_WIDTH = 3;
+// Glow size is the diameter at the inner halo stop (42% opacity).
+export const GLOW_INNER_FRACTION = 0.22;
+export const DEFAULT_GLOW_SIZE = 6;
+export const DEFAULT_LINE_WIDTH = 1;
 export type Layer = {
   id: string;
   dataset_id?: string;
@@ -124,6 +137,13 @@ export type Decisions = {
   conflict_choices: Record<string, number>;
   override_units: boolean;
 };
+export type ImportSelection = {
+  epoch_column: string;
+  time_scale: Metadata["time_scale"];
+  start: string | null;
+  end: string | null;
+  interval_s: number | null;
+};
 export type Inspection = {
   id: string;
   filename: string;
@@ -132,8 +152,26 @@ export type Inspection = {
   worksheets?: string[];
   headers: string[];
   mapping: Record<string, string>;
+  input_types: InputType[];
+  requires_reduction?: boolean;
+  source_input_rows?: number | null;
+  source_count_exact?: boolean;
+  source_bytes?: number;
+  retained_bytes?: number;
+  selection?: ImportSelection | null;
   input_rows: number;
   preview: { source_row: number; values: Record<string, string> }[];
+};
+export type ReductionJob = {
+  id: string;
+  status:
+    "queued" | "running" | "cancelling" | "cancelled" | "completed" | "failed";
+  phase: "counting" | "reading" | "processing" | "completed";
+  scanned: number;
+  total: number | null;
+  total_exact: boolean;
+  result?: Inspection | null;
+  error?: { message: string } | null;
 };
 export type Report = {
   ok: boolean;
@@ -143,7 +181,12 @@ export type Report = {
     id: string;
     epoch_utc: string;
     resolved: boolean;
-    records: { source_rows: number[]; elements: Elements }[];
+    records: {
+      source_rows: number[];
+      elements: Elements | null;
+      position_km: Vec3;
+      velocity_km_s: Vec3 | null;
+    }[];
   }[];
   stats: Record<string, unknown>;
 };

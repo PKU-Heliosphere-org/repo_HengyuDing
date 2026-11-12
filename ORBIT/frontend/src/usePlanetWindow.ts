@@ -18,12 +18,14 @@ export function usePlanetWindow(
   leaps: Leap[],
   catalog: PlanetCatalog | null,
   historySeconds = 0,
+  enabled = true,
 ) {
   const [data, setData] = useState<PlanetWindow | null>(null),
     [loading, setLoading] = useState(false),
     [error, setError] = useState("");
   const request = useRef({ version: 0, pending: false, key: "", failed: "" });
   const key = [
+    enabled,
     base,
     system.center,
     system.frame,
@@ -42,7 +44,7 @@ export function usePlanetWindow(
       setError("");
       storedKey.current = "";
     }
-    if (!ids.length || !base || !catalog || !leaps.length) {
+    if (!enabled || !ids.length || !base || !catalog || !leaps.length) {
       setLoading(false);
       return;
     }
@@ -57,7 +59,11 @@ export function usePlanetWindow(
     const span = historySeconds
       ? historySeconds + lead * 2
       : Math.max(4 * 86400, Math.min(120 * 86400, speed * 20));
-    const margin = Math.min(span * 0.15, Math.max(3600, speed * 4));
+    // History extends only `lead` beyond the cursor. A margin based on its
+    // full (possibly year-long) span can exceed that lead and refetch forever.
+    const margin = historySeconds
+      ? Math.min(lead * 0.5, Math.max(3600, speed * 4))
+      : Math.min(span * 0.15, Math.max(3600, speed * 4));
     const covered =
       valid &&
       Math.max(minimum, time - historySeconds) >= data.times[0] &&
@@ -115,6 +121,6 @@ export function usePlanetWindow(
           setLoading(false);
         }
       });
-  }, [key, time, speed, data, leaps, catalog]);
+  }, [key, time, speed, data, leaps, catalog, enabled]);
   return { data: storedKey.current === key ? data : null, loading, error };
 }

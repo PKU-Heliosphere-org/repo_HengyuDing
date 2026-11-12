@@ -12,9 +12,14 @@ import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { download } from "./api";
 import { drawingIndices, drawingSegments } from "./geometry";
+import { createTrail, writeTrail } from "./trail";
 import { offsetSeconds, sampleAt } from "./time";
 import { planetSnapshot, osculatingPlanetOrbit } from "./planetMath";
-import { DEFAULT_GLOW_SIZE, DEFAULT_LINE_WIDTH } from "./types";
+import {
+  GLOW_INNER_FRACTION,
+  DEFAULT_GLOW_SIZE,
+  DEFAULT_LINE_WIDTH,
+} from "./types";
 import { AU_KM, PlanetVisual, textureRepository } from "./planetSurface";
 import type {
   BodyId,
@@ -68,7 +73,6 @@ type Marker = {
   point: THREE.Sprite;
   label: HTMLDivElement;
   trail: LineSegments2;
-  buffer: Float32Array;
   segments: [number, number][];
   offset: number;
   toleranceKm: number;
@@ -79,7 +83,6 @@ type PlanetMarker = {
   label: HTMLDivElement;
   orbit: LineSegments2 | null;
   trail: LineSegments2;
-  buffer: Float32Array;
   orbitTime?: number;
   trailTime?: number;
   trailSeconds?: number;
@@ -126,7 +129,7 @@ function glowTexture() {
   const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
   g.addColorStop(0, "rgba(255,255,255,1)");
   g.addColorStop(0.09, "rgba(255,255,255,1)");
-  g.addColorStop(0.22, "rgba(255,255,255,.42)");
+  g.addColorStop(GLOW_INNER_FRACTION, "rgba(255,255,255,.42)");
   g.addColorStop(0.5, "rgba(255,255,255,.09)");
   g.addColorStop(1, "rgba(255,255,255,0)");
   ctx.fillStyle = g;
@@ -220,50 +223,6 @@ function refineLine(line: LineSegments2, tolerance: number, force = false) {
   );
   line.geometry.instanceCount = values.length / 6;
   source.tolerance = wanted;
-}
-function createTrail(lineWidth: number) {
-  const buffer = new Float32Array(4096 * 6);
-  const geometry = new LineSegmentsGeometry()
-    .setPositions(buffer)
-    .setColors(new Float32Array(buffer.length));
-  (
-    geometry.attributes.instanceStart as THREE.InterleavedBufferAttribute
-  ).data.setUsage(THREE.DynamicDrawUsage);
-  (
-    geometry.attributes.instanceColorStart as THREE.InterleavedBufferAttribute
-  ).data.setUsage(THREE.DynamicDrawUsage);
-  geometry.instanceCount = 0;
-  const trail = new LineSegments2(
-    geometry,
-    strokeMaterial("#ffffff", lineWidth, 0.95, true),
-  );
-  trail.frustumCulled = false;
-  return { trail, buffer };
-}
-function writeTrail(
-  trail: LineSegments2,
-  buffer: Float32Array,
-  segments: number[],
-  color: string,
-) {
-  const n = Math.min(4096, segments.length / 6);
-  buffer.set(segments.slice(-n * 6));
-  trail.geometry.instanceCount = n;
-  (
-    trail.geometry.attributes.instanceStart as THREE.InterleavedBufferAttribute
-  ).data.needsUpdate = true;
-  const colors = trail.geometry.attributes
-    .instanceColorStart as THREE.InterleavedBufferAttribute;
-  const colorsEnd = trail.geometry.attributes
-    .instanceColorEnd as THREE.InterleavedBufferAttribute;
-  const c = new THREE.Color(color);
-  for (let i = 0; i < n; i++) {
-    const start = 0.12 + (0.88 * i) / n,
-      end = 0.12 + (0.88 * (i + 1)) / n;
-    colors.setXYZ(i, c.r * start, c.g * start, c.b * start);
-    colorsEnd.setXYZ(i, c.r * end, c.g * end, c.b * end);
-  }
-  colors.data.needsUpdate = true;
 }
 function captureCamera(r: Runtime): CameraState {
   return {
@@ -532,7 +491,7 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
             ((m.layer.glowSize ?? DEFAULT_GLOW_SIZE) *
               2 *
               Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) /
-              Math.max(1, height),
+              (GLOW_INNER_FRACTION * Math.max(1, height)),
           );
           r.poses.set(m.layer.id, {
             position: m.point.position.clone(),
@@ -550,7 +509,8 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
           if (m.trail.visible) {
             const end = p.time - m.offset,
               start = end - p.trailSeconds,
-              segments: number[] = [];
+              segments: number[] = [],
+              times: number[] = [];
             const anchor = fromKm(m.ds.samples[0].position_km);
             for (const [a, b] of m.segments) {
               const first = m.ds.samples[a],
@@ -565,7 +525,8 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
                       )?.position
                     : first.position_km,
                 p1 = last.t > end ? at.position : last.position_km;
-              if (p0 && p1)
+              if (p0 && p1) {
+                times.push(Math.max(start, first.t), Math.min(end, last.t));
                 segments.push(
                   p0[0] / AU_KM - anchor.x,
                   p0[1] / AU_KM - anchor.y,
@@ -574,8 +535,16 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
                   p1[1] / AU_KM - anchor.y,
                   p1[2] / AU_KM - anchor.z,
                 );
+              }
             }
-            writeTrail(m.trail, m.buffer, segments, m.layer.color);
+            writeTrail(
+              m.trail,
+              segments,
+              times,
+              m.layer.color,
+              end,
+              p.trailSeconds,
+            );
           }
         }
         for (const m of r.planets) {
@@ -646,20 +615,47 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
             ];
             const body = history.bodies[m.layer.body_id!];
             const points: Vec3[] = startState ? [startState.position] : [];
-            if (body)
-              for (let i = 0; i < history.times.length; i++) {
-                if (history.times[i] > start && history.times[i] < p.time)
-                  points.push(body.positions_km[i]);
+            const pointTimes: number[] = startState ? [start] : [];
+            if (body) {
+              let lo = 0,
+                hi = history.times.length;
+              while (lo < hi) {
+                const mid = (lo + hi) >>> 1;
+                if (history.times[mid] <= start) lo = mid + 1;
+                else hi = mid;
               }
+              // Cache windows can span years. Only visit the visible history,
+              // retaining the history window's existing adaptive resolution.
+              const step = Math.max(
+                3600,
+                Math.ceil(p.trailSeconds / 2600 / 3600) * 3600,
+              );
+              let last = start - step;
+              for (
+                let i = lo;
+                i < history.times.length && history.times[i] < p.time;
+                i++
+              ) {
+                if (history.times[i] > start && history.times[i] < p.time) {
+                  if (history.times[i] - last < step - 0.001) continue;
+                  points.push(body.positions_km[i]);
+                  pointTimes.push(history.times[i]);
+                  last = history.times[i];
+                }
+              }
+            }
             points.push(state.position);
+            pointTimes.push(p.time);
             const anchor = fromKm(points[0]);
-            const segments: number[] = [];
+            const segments: number[] = [],
+              times: number[] = [];
             for (let i = 1; i < points.length; i++) {
               if (
                 Math.hypot(...points[i].map((x, j) => x - points[i - 1][j])) <
                 1e-6
               )
                 continue;
+              times.push(pointTimes[i - 1], pointTimes[i]);
               for (const point of [points[i - 1], points[i]])
                 segments.push(
                   point[0] / AU_KM - anchor.x,
@@ -668,7 +664,14 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
                 );
             }
             m.trail.position.copy(anchor);
-            writeTrail(m.trail, m.buffer, segments, m.layer.color);
+            writeTrail(
+              m.trail,
+              segments,
+              times,
+              m.layer.color,
+              p.time,
+              p.trailSeconds,
+            );
             m.trailTime = p.time;
             m.trailSeconds = p.trailSeconds;
           }
@@ -886,7 +889,32 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
             Math.sin((i * Math.PI) / 90) * bound * fraction * AU_KM,
             0,
           ]);
-          r.content.add(curveLines(points, new Set(), "#8c9eb7", bound, 0.13));
+          const ring = curveLines(points, new Set(), "#8c9eb7", bound, 0.13);
+          // Reference rings must not cut dark slits into coplanar trails.
+          ring.material.depthWrite = false;
+          ring.renderOrder = -1;
+          r.content.add(ring);
+        }
+        // Polar reference plane: one spoke every 30 degrees in the XY plane.
+        for (let i = 0; i < 12; i++) {
+          const angle = (i * Math.PI) / 6;
+          const spoke = curveLines(
+            [
+              [0, 0, 0],
+              [
+                Math.cos(angle) * bound * AU_KM,
+                Math.sin(angle) * bound * AU_KM,
+                0,
+              ],
+            ],
+            new Set(),
+            "#8c9eb7",
+            bound,
+            0.13,
+          );
+          spoke.material.depthWrite = false;
+          spoke.renderOrder = -1;
+          r.content.add(spoke);
         }
       }
       if (props.axes) r.content.add(new THREE.AxesHelper(bound * 0.4));
@@ -922,16 +950,13 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
               )
             : null;
           if (orbit) r.content.add(orbit);
-          const { trail, buffer } = createTrail(
-            layer.lineWidth ?? DEFAULT_LINE_WIDTH,
-          );
+          const trail = createTrail(layer.glowSize ?? DEFAULT_GLOW_SIZE);
           r.content.add(trail);
           r.planets.push({
             layer,
             visual,
             orbit,
             trail,
-            buffer,
             label: makeLabel(layer),
           });
           continue;
@@ -963,9 +988,7 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
           }),
         );
         r.content.add(point);
-        const { trail, buffer } = createTrail(
-          layer.lineWidth ?? DEFAULT_LINE_WIDTH,
-        );
+        const trail = createTrail(layer.glowSize ?? DEFAULT_GLOW_SIZE);
         trail.position.copy(fromKm(ds.samples[0].position_km));
         trail.frustumCulled = false;
         r.content.add(trail);
@@ -975,7 +998,6 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
           point,
           label: makeLabel(layer),
           trail,
-          buffer,
           segments: drawingIndices(
             ds.samples.map((s) => s.position_km),
             new Set(ds.breaks),

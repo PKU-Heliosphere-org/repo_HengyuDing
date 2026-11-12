@@ -7,6 +7,7 @@ CENTERS = {
     "earth": {"name": "地球", "mu": 398600.435507, "source": MU_SOURCE},
 }
 FIELDS = ["epoch", "a", "e", "i", "raan", "arg_periapsis", "true_anomaly", "mean_anomaly"]
+STATE_FIELDS = ["x", "y", "z", "vx", "vy", "vz"]
 
 
 class StrictModel(BaseModel):
@@ -21,7 +22,8 @@ class Metadata(StrictModel):
     epoch_mode: Literal["per_row", "single"] = "per_row"
     single_epoch: str | None = None
     time_scale: Literal["UTC", "TT", "TDB"] = "UTC"
-    length_unit: Literal["km", "AU"] = "km"
+    length_unit: Literal["km", "m", "AU"] = "km"
+    speed_unit: Literal["km/s", "m/s", "AU/day", "AU/s"] = "km/s"
     angle_unit: Literal["deg", "rad"] = "deg"
     mu_km3_s2: float | None = Field(default=None, gt=0)
     mu_source: str = ""
@@ -49,10 +51,21 @@ class Decisions(StrictModel):
     override_units: bool = False
 
 
+class ImportSelection(StrictModel):
+    epoch_column: str = Field(min_length=1)
+    time_scale: Literal["UTC", "TT", "TDB"] = "UTC"
+    start: str | None = None
+    end: str | None = None
+    interval_s: float | None = Field(default=None, ge=.001, le=1e12)
+
+
 class ImportRequest(StrictModel):
     metadata: Metadata
     mapping: dict[str, str]
     decisions: Decisions = Field(default_factory=Decisions)
+    input_type: Literal["elements", "cartesian"] | None = None
+    velocity_source: Literal["provided", "finite_difference"] = "provided"
+    selection: ImportSelection | None = None
 
 
 class Elements(StrictModel):

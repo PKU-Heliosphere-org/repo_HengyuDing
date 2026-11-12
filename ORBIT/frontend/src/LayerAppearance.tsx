@@ -10,14 +10,14 @@ export function LayerAppearance({
 }) {
   return (
     <div className="appearance-controls">
-      <label>
+      <label title="光点大小为内层光晕直径，外层光晕更大。尾迹头部宽度为光点大小的一半，向历史方向逐渐收细。">
         <span>光点大小</span>
         <input
           aria-label={layer.kind === "planet" ? "行星光点大小" : "对象光点大小"}
           type="range"
           min="2"
           max="48"
-          step="1"
+          step="0.1"
           value={layer.glowSize ?? DEFAULT_GLOW_SIZE}
           onChange={(e) => patch({ glowSize: Number(e.target.value) })}
         />

@@ -1,32 +1,58 @@
-import csv
-import hashlib
-import io
 import math
 import re
 import warnings
 from collections import defaultdict
-from contextlib import ExitStack
-from datetime import date, datetime
-from pathlib import Path
-from zipfile import ZipFile, BadZipFile
-from xml.etree.ElementTree import ParseError
-
-from openpyxl import load_workbook
-from openpyxl.utils.exceptions import InvalidFileException
 
 import numpy as np
 from astropy.time import Time
 from astropy.utils import iers
 
 from .mechanics import AU_KM, state
-from .models import FIELDS, ImportRequest
+from .models import FIELDS, STATE_FIELDS, ImportRequest
 
 iers.conf.auto_download = False
 MAX_BYTES = 20 * 1024 * 1024
 MAX_ROWS = 100000
-ALIASES = dict(zip(FIELDS, ["Time (UTCG)", "Semi-major Axis (km)", "Eccentricity", "Inclination (deg)",
-                           "RAAN (deg)", "Arg of Perigee (deg)", "True Anomaly (deg)", "Mean Anomaly (deg)"]))
 NUMERIC = FIELDS[1:]
+
+
+def detect_mapping(headers):
+    """Only unambiguous header aliases; never infer axes or units from numbers."""
+    aliases = {
+        'epoch': ['epoch', 't', 'time', 'time (utcg)', 'datetime', 'utc'],
+        'a': ['a', 'semi-major axis'], 'e': ['e', 'eccentricity'],
+        'i': ['i', 'inclination'], 'raan': ['raan', 'om', 'omega', 'ascending node'],
+        'arg_periapsis': ['arg_periapsis', 'w', 'arg of perigee', 'argument of periapsis'],
+        'true_anomaly': ['true_anomaly', 'ta', 'true anomaly'],
+        'mean_anomaly': ['mean_anomaly', 'ma', 'mean anomaly'],
+    }
+    for axis in 'xyz':
+        aliases[axis] = [axis, 'position '+axis, 'position_'+axis, axis+' position']
+        aliases['v'+axis] = ['v'+axis, 'v_'+axis, 'velocity '+axis, 'velocity_'+axis, axis+' velocity', axis+'dot']
+    def normalize(s):
+        s = re.sub(r'\([^)]*\)|\[[^]]*\]', '', s.lower()).strip()
+        s = re.sub(r'_(?:km|m|au)(?:_(?:s|day))?$|_(?:deg|rad)$', '', s)
+        return re.sub(r'\s+', ' ', s)
+    result = {}
+    for field, names in aliases.items():
+        exact = [h for h in headers if h.lower() == field]
+        candidates = exact or [h for h in headers if normalize(h) in names]
+        if len(candidates) == 1:
+            result[field] = candidates[0]
+    return result
+
+
+def input_types(mapping):
+    return (["elements"] if all(mapping.get(f) for f in NUMERIC[:6]) else []) + (
+        ["cartesian"] if all(mapping.get(f) for f in STATE_FIELDS[:3]) else [])
+
+
+def header_unit(column):
+    match = re.search(r'[\[(]\s*(km/sec|km/s|m/sec|m/s|au/day|au/s|km|au|m|deg|rad)\s*[\])]', column.lower())
+    if match:
+        return match.group(1).replace('/sec', '/s')
+    suffix = re.search(r'_(km_s|m_s|au_day|au_s|km|m|au|deg|rad)$', column.lower())
+    return suffix.group(1).replace('_', '/') if suffix else None
 
 
 class ImportProblem(Exception):
@@ -36,127 +62,17 @@ class ImportProblem(Exception):
 
 
 def read_csv(raw):
-    if len(raw) > MAX_BYTES:
-        raise ImportProblem("CSV 超过 20 MiB", "file_too_large", status=413)
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        raise ImportProblem("请将 CSV 转为 UTF-8 编码")
-    if "\x00" in text:
-        raise ImportProblem("文件包含空字节，不是有效文本 CSV")
-    try:
-        reader = csv.reader(io.StringIO(text, newline=""), strict=True)
-        headers = [s.strip() for s in next(reader)]
-        if not headers or len(set(headers)) != len(headers):
-            raise ImportProblem("表头为空或存在重复列名")
-        rows, empty = [], 0
-        for row in reader:
-            line = reader.line_num
-            if not row or all(not x.strip() for x in row):
-                empty += 1
-                continue
-            if len(row) != len(headers):
-                raise ImportProblem("CSV 列数不一致", details=[{"source_rows": [line]}])
-            rows.append({"source_row": line, "values": dict(zip(headers, [x.strip() for x in row]))})
-            if len(rows) > MAX_ROWS:
-                raise ImportProblem("CSV 超过 100,000 行", "too_many_rows", status=413)
-        if not rows:
-            raise ImportProblem("CSV 没有数据行")
-        mapping = {field: field if field in headers else alias for field, alias in ALIASES.items() if field in headers or alias in headers}
-        return {"headers": headers, "rows": rows, "empty_rows": empty, "mapping": mapping,
-                "sha256": hashlib.sha256(raw).hexdigest()}
-    except (csv.Error, StopIteration) as exc:
-        raise ImportProblem("无法解析 CSV：" + str(exc))
+    return read_table(raw, 'orbit.csv')
 
 
-def read_table(raw, filename, worksheet=None, discover=False):
-    suffix = Path(filename).suffix.lower()
-    if suffix == '.xlsx':
-        return read_xlsx(raw, worksheet, discover)
-    if suffix not in {'.csv', ''}:
-        raise ImportProblem("仅支持 CSV 和 XLSX 文件；旧版 XLS 请先另存为 XLSX")
-    if worksheet is not None:
-        raise ImportProblem("CSV 不包含工作表")
-    return {**read_csv(raw), 'source_format': 'csv', 'worksheet': None, 'worksheets': []}
+def read_table(raw, filename, worksheet=None, discover=False, selection=None, allow_reduction=False,
+               progress=None, cancelled=None):
+    from .table_reader import read
+    return read(raw, filename, worksheet, discover, selection, allow_reduction, progress, cancelled)
 
 
 def read_xlsx(raw, worksheet=None, discover=False):
-    if len(raw) > MAX_BYTES:
-        raise ImportProblem("XLSX 超过 20 MiB", "file_too_large", status=413)
-    try:
-        with ZipFile(io.BytesIO(raw)) as archive:
-            members = archive.infolist()
-            if len(members) > 10000 or sum(item.file_size for item in members) > 100*1024*1024:
-                raise ImportProblem("XLSX 解压内容超过读取上限，请精简工作簿", "file_too_large", status=413)
-        with ExitStack() as resources:
-            workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=False, keep_links=False)
-            resources.callback(workbook.close)
-            names = [sheet.title for sheet in workbook.worksheets]
-            if not names:
-                raise ImportProblem("XLSX 没有可读取的工作表")
-            if worksheet is None:
-                if len(names) > 1:
-                    if discover:
-                        return {'requires_worksheet': True, 'worksheets': names, 'source_format': 'xlsx'}
-                    raise ImportProblem("XLSX 含多个工作表，请明确选择工作表")
-                worksheet = names[0]
-            if not isinstance(worksheet, str) or worksheet not in names:
-                raise ImportProblem("所选 XLSX 工作表不存在")
-            sheet = workbook[worksheet]
-            if (sheet.max_column or 0) > 256 or (sheet.max_row or 0) > MAX_ROWS+1001:
-                raise ImportProblem("工作表最多支持 256 列、100,000 条数据，请移除多余行列", "too_many_rows", status=413)
-            cached = load_workbook(io.BytesIO(raw), read_only=True, data_only=True, keep_links=False)
-            resources.callback(cached.close)
-            sheet.reset_dimensions()
-            cached[worksheet].reset_dimensions()
-            headers, rows, empty, formula_count = None, [], 0, 0
-            for line, (cells, values) in enumerate(zip(sheet.iter_rows(), cached[worksheet].iter_rows()), 1):
-                if len(cells) > 256:
-                    raise ImportProblem("工作表超过 256 列", "too_many_columns", status=413)
-                if line > MAX_ROWS+1001:
-                    raise ImportProblem("工作表物理行数超过读取上限", "too_many_rows", status=413)
-                strings = []
-                for cell, cached_cell in zip(cells, values):
-                    value = cell.value
-                    if cell.data_type == 'f':
-                        formula_count += 1
-                        value = cached_cell.value
-                        if value is None:
-                            raise ImportProblem(f"工作表 {worksheet} 的 {cell.coordinate} 公式没有缓存结果；请在 Excel 中重新计算并保存，或粘贴为值", details=[{'source_rows':[line]}])
-                    if cell.data_type == 'e' or cached_cell.data_type == 'e':
-                        raise ImportProblem(f"工作表 {worksheet} 的 {cell.coordinate} 包含 Excel 错误值", details=[{'source_rows':[line]}])
-                    if isinstance(value, datetime):
-                        value = value.isoformat()
-                    elif isinstance(value, date):
-                        value = value.isoformat()+'T00:00:00'
-                    strings.append('' if value is None else str(value).strip())
-                if not any(strings):
-                    empty += 1
-                    continue
-                if headers is None:
-                    while strings and not strings[-1]:
-                        strings.pop()
-                    headers = strings
-                    if any(not s for s in headers) or len(set(headers)) != len(headers):
-                        raise ImportProblem("工作表表头为空或存在重复列名", details=[{'source_rows':[line]}])
-                    continue
-                if any(strings[len(headers):]):
-                    raise ImportProblem("工作表存在没有表头的数据列", details=[{'source_rows':[line]}])
-                strings = (strings+['']*len(headers))[:len(headers)]
-                rows.append({'source_row': line, 'values': dict(zip(headers, strings))})
-                if len(rows) > MAX_ROWS:
-                    raise ImportProblem("XLSX 超过 100,000 条数据", "too_many_rows", status=413)
-            if not headers or not rows:
-                raise ImportProblem(f"工作表 {worksheet} 没有数据行")
-            mapping = {field: field if field in headers else alias for field, alias in ALIASES.items() if field in headers or alias in headers}
-            notes = [f"使用 {formula_count} 个 Excel 公式缓存结果，未重新计算公式；请确认源文件已重新计算并保存。"] if formula_count else []
-            return {'headers':headers, 'rows':rows, 'empty_rows':empty, 'mapping':mapping,
-                    'sha256':hashlib.sha256(raw).hexdigest(), 'source_format':'xlsx', 'worksheet':worksheet,
-                    'worksheets':names, 'warnings':notes, 'audit':[f"XLSX 工作表：{worksheet}"]}
-    except ImportProblem:
-        raise
-    except (BadZipFile, ValueError, KeyError, OSError, TypeError, EOFError, ParseError, InvalidFileException) as exc:
-        raise ImportProblem("无法读取 XLSX；请确认文件完整、未加密，并可由 Excel 正常打开", "invalid_workbook") from exc
+    return read_table(raw, 'orbit.xlsx', worksheet, discover)
 
 
 def epoch_string(value, scale):
@@ -185,21 +101,39 @@ def validate(parsed, request: ImportRequest):
     def issue(message, rows=None, field=None):
         problems.append({"message": message, "source_rows": rows or [], "field": field})
 
-    required = NUMERIC[:6] + (["epoch"] if meta.epoch_mode == "per_row" else [])
+    if parsed.get('requires_reduction'):
+        return {'ok':False, 'issues':[{'message':'超过导入容量，请先选择时间范围或降低采样频率并应用处理', 'source_rows':[]}],
+                'warnings':[], 'conflicts':[], 'stats':{'input_rows':parsed.get('source_input_rows')}}, None
+    selection = parsed.get('selection')
+    if selection and (mapping.get('epoch') != selection['epoch_column'] or meta.time_scale != selection['time_scale']):
+        issue('时间列或时间体系已改变，请重新应用时间范围和采样设置')
+    if request.selection is not None and request.selection.model_dump() != selection:
+        issue('导入筛选设置与实际处理结果不同，请重新应用处理')
+
+    candidates = input_types(mapping)
+    kind = request.input_type or (candidates[0] if len(candidates) == 1 else 'elements')
+    if request.input_type is None and len(candidates) > 1:
+        issue("同时存在六根数和空间坐标，请选择使用的数据类型", field='input_type')
+    generate = kind == 'cartesian' and request.velocity_source == 'finite_difference'
+    active = NUMERIC if kind == 'elements' else (STATE_FIELDS[:3] if generate else STATE_FIELDS)
+    required = (NUMERIC[:6] if kind == 'elements' else active) + (["epoch"] if meta.epoch_mode == "per_row" else [])
     for field in required:
         if not mapping.get(field) or mapping[field] not in parsed["headers"]:
-            issue("缺少必需列映射", field=field)
-    used = [v for k, v in mapping.items() if v and k in FIELDS]
+            issue("缺少速度分量；请补充映射，或明确选择差分生成速度" if field in STATE_FIELDS[3:] else "缺少必需列映射", field=field)
+    used = [v for k, v in mapping.items() if v and k in [*active, 'epoch']]
     if len(set(used)) != len(used):
         issue("一个源列不能映射到多个字段")
-    if any(k not in FIELDS or (v and v not in parsed["headers"]) for k, v in mapping.items()):
+    if any(k not in [*FIELDS, *STATE_FIELDS] or (v and v not in parsed["headers"]) for k, v in mapping.items()):
         issue("存在未知的字段或源列映射")
     if meta.epoch_mode == "single" and (len(parsed["rows"]) != 1 or mapping.get("epoch")):
         issue("单历元模式只适用于一条记录且未映射时间列的文件")
     for field, column in mapping.items():
-        if not column:
+        if not column or field not in active:
             continue
-        mismatch = (field == "a" and "(km)" in column and meta.length_unit != "km") or (field in NUMERIC[2:] and "(deg)" in column and meta.angle_unit != "deg")
+        unit = header_unit(column)
+        expected = meta.speed_unit if field in STATE_FIELDS[3:] else (
+            meta.length_unit.lower() if field in ['a', *STATE_FIELDS[:3]] else meta.angle_unit)
+        mismatch = unit is not None and field != 'e' and unit != expected.lower()
         if mismatch and not decisions.override_units:
             issue("选择的单位与表头不同；如确定需覆盖，请显式确认", field=field)
     if problems:
@@ -216,29 +150,38 @@ def validate(parsed, request: ImportRequest):
         if line in exclusions:
             continue
         try:
-            raw_numbers = {f: float(values[mapping[f]]) for f in NUMERIC if mapping.get(f)}
+            raw_numbers = {f: float(values[mapping[f]]) for f in active if mapping.get(f)}
             if not all(math.isfinite(v) for v in raw_numbers.values()):
-                raise ValueError("根数不可包含 NaN 或 Infinity")
-            a = raw_numbers["a"] * (AU_KM if meta.length_unit == "AU" else 1)
-            factor = math.pi/180 if meta.angle_unit == "deg" else 1
-            x = [a, raw_numbers["e"], *[raw_numbers[f]*factor for f in NUMERIC[2:6]]]
-            position, velocity = state(x, meta.mu_km3_s2)
+                raise ValueError("输入数值不可包含 NaN 或 Infinity")
+            length_factor = {'km': 1, 'm': .001, 'AU': AU_KM}[meta.length_unit]
+            elements = None
+            if kind == 'elements':
+                a = raw_numbers["a"] * length_factor
+                factor = math.pi/180 if meta.angle_unit == "deg" else 1
+                x = [a, raw_numbers["e"], *[raw_numbers[f]*factor for f in NUMERIC[2:6]]]
+                position, velocity = state(x, meta.mu_km3_s2)
+                elements = dict(zip(NUMERIC[:6], [a, x[1], *[math.degrees(v) for v in x[2:]]]))
+                for f in ["raan", "arg_periapsis", "true_anomaly"]:
+                    elements[f] %= 360
+                if "mean_anomaly" in raw_numbers:
+                    if x[1] < 1:
+                        E = 2*math.atan2(math.sqrt(1-x[1])*math.sin(x[5]/2), math.sqrt(1+x[1])*math.cos(x[5]/2))
+                        delta = E-x[1]*math.sin(E)-raw_numbers["mean_anomaly"]*factor
+                        if abs(math.atan2(math.sin(delta),math.cos(delta))) > math.radians(.5):
+                            anomaly_mismatch.append(line)
+                    else:
+                        hyperbolic_mean.append(line)
+                if abs(1-x[1]) < 1e-4:
+                    warnings_list.append(f"行 {line} 接近抛物线，数值敏感")
+            else:
+                position = np.array([raw_numbers[f]*length_factor for f in STATE_FIELDS[:3]])
+                speed_factor = {'km/s':1, 'm/s':.001, 'AU/day':AU_KM/86400, 'AU/s':AU_KM}[meta.speed_unit]
+                velocity = None if generate else np.array([raw_numbers[f]*speed_factor for f in STATE_FIELDS[3:]])
+                if not np.isfinite(position).all() or (velocity is not None and not np.isfinite(velocity).all()):
+                    raise ValueError("位置或速度单位换算溢出")
             epoch = epoch_string(values[mapping["epoch"]] if meta.epoch_mode == "per_row" else meta.single_epoch, meta.time_scale)
-            elements = dict(zip(NUMERIC[:6], [a, x[1], *[math.degrees(v) for v in x[2:]]]))
-            for f in ["raan", "arg_periapsis", "true_anomaly"]:
-                elements[f] %= 360
-            if "mean_anomaly" in raw_numbers:
-                if x[1] < 1:
-                    E = 2*math.atan2(math.sqrt(1-x[1])*math.sin(x[5]/2), math.sqrt(1+x[1])*math.cos(x[5]/2))
-                    delta = E-x[1]*math.sin(E)-raw_numbers["mean_anomaly"]*factor
-                    if abs(math.atan2(math.sin(delta),math.cos(delta))) > math.radians(.5):
-                        anomaly_mismatch.append(line)
-                else:
-                    hyperbolic_mean.append(line)
-            if abs(1-x[1]) < 1e-4:
-                warnings_list.append(f"行 {line} 接近抛物线，数值敏感")
             converted.append({"source_rows": [line], "elements": elements, "position_km": position.tolist(),
-                              "speed_km_s": float(np.linalg.norm(velocity)), "raw_numbers": raw_numbers})
+                              "velocity_km_s": None if velocity is None else velocity.tolist(), "raw_numbers": raw_numbers})
             times.append(epoch)
         except (ValueError, OverflowError, KeyError) as exc:
             issue(str(exc), [line])
@@ -288,7 +231,7 @@ def validate(parsed, request: ImportRequest):
             choice = decisions.conflict_choices.get(group_id)
             candidate = next((r for r in classes if choice in r["source_rows"]), None)
             conflicts.append({"id": group_id, "epoch_utc": classes[0]["epoch_utc"],
-                              "records": [{"source_rows": r["source_rows"], "elements": r["elements"]} for r in classes], "resolved": candidate is not None})
+                              "records": [{k:r[k] for k in ['source_rows', 'elements', 'position_km', 'velocity_km_s']} for r in classes], "resolved": candidate is not None})
             if candidate is None:
                 issue("同一时刻有冲突记录，请选择保留项或排除整组", [r for rec in classes for r in rec["source_rows"]])
                 continue
@@ -304,8 +247,30 @@ def validate(parsed, request: ImportRequest):
     unique.sort(key=lambda r: r["t"])
     steps = np.diff([r["t"] for r in unique])
     breaks = [i+1 for i, dt in enumerate(steps) if dt > meta.max_interpolation_gap_s]
+    if generate and not problems:
+        boundaries = [0, *breaks, len(unique)]
+        for left, right in zip(boundaries, boundaries[1:]):
+            segment = unique[left:right]
+            if len(segment) < 2:
+                issue("连续片段只有一个采样点，无法差分生成速度；请补充速度或调整数据缺口设置", segment[0]['source_rows'])
+                continue
+            positions = np.array([s['position_km'] for s in segment])
+            clock = np.array([s['t'] for s in segment])
+            with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
+                velocities = np.gradient(positions, clock, axis=0, edge_order=2 if len(segment) >= 3 else 1)
+            if not np.isfinite(velocities).all():
+                issue("差分速度计算溢出，请检查采样间隔和坐标数值")
+                continue
+            for rec, velocity in zip(segment, velocities):
+                rec['velocity_km_s'] = velocity.tolist()
+        notes.append("用户明确选择差分生成速度：按 TAI 实际秒数，非等间隔三点差分，端点单边差分；两点片段使用割线，不跨越数据缺口。")
+        warnings_list.append("速度由位置数值差分估计，误差取决于采样间隔和位置精度，不等同于原始星历速度；未进行轨道传播。")
+    def hyperbolic(rec):
+        r = np.linalg.norm(rec['position_km'])
+        v = rec['velocity_km_s']
+        return bool(v is not None and r > 0 and float(np.dot(v, v))*r > 2*meta.mu_km3_s2)
     stats = {"input_rows": len(parsed["rows"]), "valid_rows": len(converted), "output_rows": len(unique),
-             "excluded_rows": len(exclusions), "empty_rows": parsed["empty_rows"], "hyperbolic_rows": sum(r["elements"]["e"]>1 for r in converted),
+             "excluded_rows": len(exclusions), "empty_rows": parsed["empty_rows"], "hyperbolic_rows": sum(hyperbolic(r) for r in converted),
              "duplicate_groups": duplicate_groups, "conflict_groups": len(conflicts), "unordered": unordered,
              "start_utc": unique[0]["epoch_utc"] if unique else None, "end_utc": unique[-1]["epoch_utc"] if unique else None,
              "max_step_s": float(max(steps)) if len(steps) else 0, "gap_count": len(breaks)}
@@ -322,7 +287,12 @@ def validate(parsed, request: ImportRequest):
     notes += [f"明确排除源行：{sorted(exclusions)}"] if exclusions else []
     if unordered:
         notes.append("按历元稳定排序")
+    samples = [{k:v for k,v in rec.items() if k not in {'elements', 'raw_numbers'}} for rec in unique]
+    resolved_request = request.model_dump()
+    resolved_request['input_type'] = kind
+    resolved_request['selection'] = selection
     dataset = {"metadata": meta.model_dump(), "reference_tai": str(reference.isot), "time_coordinate_scale": "TAI",
-               "samples": unique, "breaks": breaks, "stats": stats, "warnings": report["warnings"], "audit": notes,
-               "source_sha256": parsed["sha256"], "import_request": request.model_dump()}
+               "samples": samples, "breaks": breaks, "stats": stats, "warnings": report["warnings"], "audit": notes,
+               "input_type":kind, "velocity_source":request.velocity_source if kind == 'cartesian' else 'elements',
+               "source_sha256": parsed["sha256"], "import_request": resolved_request}
     return report, dataset

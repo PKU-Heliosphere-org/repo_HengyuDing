@@ -5,6 +5,7 @@ import math
 import re
 import time
 import uuid
+import threading
 from pathlib import Path
 
 from astropy.time import Time
@@ -14,17 +15,21 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from . import __version__
-from .importer import MAX_BYTES, ImportProblem, read_table, validate
+from .importer import ImportProblem, read_table, validate, input_types
 from .mechanics import conic
-from .models import CENTERS, ImportRequest, PreviewRequest, StrictModel
+from .models import CENTERS, ImportRequest, ImportSelection, PreviewRequest, StrictModel
+from .table_reader import MAX_SOURCE_BYTES
+from .reduction_tasks import ReductionTask, ACTIVE
 from . import planets
 
 ROOT = Path(__file__).resolve().parents[3]
 app = FastAPI(title="ORBIT", version=__version__)
 imports: dict = {}
 datasets: dict = {}
+MAX_PROJECT_BYTES = 512 * 1024 * 1024
 
 
 @app.exception_handler(ImportProblem)
@@ -41,8 +46,9 @@ async def validation_error(_, exc):
 @app.middleware("http")
 async def size_limit(request: Request, call_next):
     length = request.headers.get("content-length", "0")
-    if length.isdigit() and int(length) > 101*1024*1024:
-        return JSONResponse(status_code=413, content={"code": "file_too_large", "message": "请求超过 100 MiB"})
+    limit = MAX_SOURCE_BYTES if request.url.path == '/api/v1/imports/inspect' else MAX_PROJECT_BYTES
+    if length.isdigit() and int(length) > limit+1024*1024:
+        return JSONResponse(status_code=413, content={"code": "file_too_large", "message": f"请求超过 {limit//1024//1024} MiB"})
     return await call_next(request)
 
 
@@ -54,18 +60,26 @@ def get_entry(table, key):
 
 def add_import(raw, filename, worksheet=None):
     now = time.monotonic()
-    for key in list(imports):
-        if now-imports[key]["created"] > 3600:
-            del imports[key]
+    for key, entry in list(imports.items()):
+        if now-entry["created"] > 3600 and not reduction_active(entry):
+            imports.pop(key, None)
     if len(imports) >= 16:
         raise ImportProblem("待处理导入过多，请完成或取消已有导入", "capacity", status=409)
-    parsed = read_table(raw, filename, worksheet, discover=True)
+    parsed = read_table(raw, filename, worksheet, discover=True, allow_reduction=True)
     if parsed.get('requires_worksheet'):
         return {**parsed, 'filename':filename}
     key = str(uuid.uuid4())
-    imports[key] = {"parsed": parsed, "raw": raw, "filename": filename, "created": now}
-    return {"id": key, "filename": filename, "headers": parsed["headers"], "mapping": parsed["mapping"],
+    imports[key] = {"parsed": parsed, "raw": raw, "filename": filename, "created": now, 'task_lock':threading.RLock()}
+    return import_inspection(key)
+
+
+def import_inspection(key):
+    entry = get_entry(imports, key)
+    parsed = entry['parsed']
+    return {"id": key, "filename": entry['filename'], "headers": parsed["headers"], "mapping": parsed["mapping"],
+            'input_types':input_types(parsed['mapping']),
             "input_rows": len(parsed["rows"]), "preview": parsed["rows"][:5], "sha256": parsed["sha256"],
+            **{k:parsed.get(k) for k in ['requires_reduction','source_input_rows','source_count_exact','source_scanned_rows','source_bytes','retained_bytes','selection']},
             'source_format':parsed['source_format'], 'worksheet':parsed['worksheet'], 'worksheets':parsed['worksheets']}
 
 
@@ -105,19 +119,81 @@ def sample():
 
 @app.post("/api/v1/imports/inspect")
 async def inspect(file: UploadFile = File(...), worksheet: str | None = Form(None)):
-    raw = await file.read(MAX_BYTES+1)
-    return add_import(raw, Path(file.filename or "orbit.csv").name, worksheet)
+    raw = await file.read(MAX_SOURCE_BYTES+1)
+    return await run_in_threadpool(add_import, raw, Path(file.filename or "orbit.csv").name, worksheet)
+
+
+@app.post('/api/v1/imports/{key}/reduce')
+def reduce_import(key: str, body: ImportSelection):
+    entry = get_entry(imports, key)
+    with entry['task_lock']:
+        if reduction_active(entry):
+            raise ImportProblem('正在处理，请等待完成或先取消处理', 'reduction_busy', status=409)
+        parsed = read_table(entry['raw'], entry['filename'], entry['parsed'].get('worksheet'),
+                            selection=body, allow_reduction=True)
+        entry['parsed'] = parsed
+        return import_inspection(key)
+
+
+def reduction_active(entry):
+    job = entry.get('reduction_job')
+    return job is not None and job.snapshot()['status'] in ACTIVE
+
+
+@app.post('/api/v1/imports/{key}/reduction-jobs', status_code=202)
+def start_reduction(key: str, body: ImportSelection):
+    entry = get_entry(imports, key)
+    with entry['task_lock']:
+        if reduction_active(entry):
+            raise ImportProblem('正在处理，请等待完成或先取消处理', 'reduction_busy', status=409)
+        def publish(parsed):
+            if imports.get(key) is not entry:
+                from .table_reader import ReadCancelled
+                raise ReadCancelled()
+            entry['parsed'] = parsed
+            return import_inspection(key)
+        job = ReductionTask(entry, body, publish)
+        entry['reduction_job'] = job
+        initial = job.snapshot()
+        job.start()
+        return initial
+
+
+def get_reduction(key, job_id):
+    entry = get_entry(imports, key)
+    job = entry.get('reduction_job')
+    if job is None or job.id != job_id:
+        raise ImportProblem('处理任务已不存在，请重新应用范围与采样', 'not_found', status=404)
+    return job
+
+
+@app.get('/api/v1/imports/{key}/reduction-jobs/{job_id}')
+def reduction_progress(key: str, job_id: str):
+    return get_reduction(key, job_id).snapshot()
+
+
+@app.post('/api/v1/imports/{key}/reduction-jobs/{job_id}/cancel')
+def cancel_reduction(key: str, job_id: str):
+    return get_reduction(key, job_id).cancel()
 
 
 @app.delete("/api/v1/imports/{key}")
 def cancel_import(key: str):
-    imports.pop(key, None)
+    entry = imports.get(key)
+    if entry:
+        with entry['task_lock']:
+            if entry.get('reduction_job'):
+                entry['reduction_job'].cancel()
+            imports.pop(key, None)
     return {"ok": True}
 
 
 @app.post("/api/v1/imports/{key}/validate")
 def validate_import(key: str, body: ImportRequest):
-    return validate(get_entry(imports, key)["parsed"], body)[0]
+    entry = get_entry(imports, key)
+    if reduction_active(entry):
+        raise ImportProblem('正在处理，请等待完成或先取消处理', 'reduction_busy', status=409)
+    return validate(entry["parsed"], body)[0]
 
 
 @app.post("/api/v1/imports/{key}/commit")
@@ -125,6 +201,8 @@ def commit_import(key: str, body: ImportRequest):
     if len(datasets) >= 64:
         raise ImportProblem("数据集数量已达本次会话上限，请保存项目后重启", "capacity", status=409)
     entry = get_entry(imports, key)
+    if reduction_active(entry):
+        raise ImportProblem('正在处理，请等待完成或先取消处理', 'reduction_busy', status=409)
     report, ds = validate(entry["parsed"], body)
     if not report["ok"]:
         raise ImportProblem("请先处理预检中的问题", "unresolved_import", report["issues"])
@@ -280,16 +358,16 @@ def export_project(body: ExportRequest):
                           "source_sha256": d["source_sha256"], "import_request": d["import_request"],
                           'source_format':d.get('source_format','csv'), 'worksheet':d.get('worksheet')} for d in chosen]}
     encoded = finite_json(data).encode("utf-8")
-    if len(encoded) > 100*1024*1024:
-        raise ImportProblem("项目超过 100 MiB", "file_too_large", status=413)
+    if len(encoded) > MAX_PROJECT_BYTES:
+        raise ImportProblem("项目超过 512 MiB", "file_too_large", status=413)
     return JSONResponse(data, headers={"Content-Disposition": 'attachment; filename="project.orbit.json"'})
 
 
 @app.post("/api/v1/projects/import")
 async def import_project(file: UploadFile = File(...)):
-    raw = await file.read(100*1024*1024+1)
-    if len(raw) > 100*1024*1024:
-        raise ImportProblem("项目超过 100 MiB", "file_too_large", status=413)
+    raw = await file.read(MAX_PROJECT_BYTES+1)
+    if len(raw) > MAX_PROJECT_BYTES:
+        raise ImportProblem("项目超过 512 MiB", "file_too_large", status=413)
     try:
         project = json.loads(raw)
         if project["schema_version"] not in {1,2}:
@@ -304,7 +382,7 @@ async def import_project(file: UploadFile = File(...)):
             if hashlib.sha256(source).hexdigest() != item["source_sha256"]:
                 raise ImportProblem("项目源文件校验失败")
             req = ImportRequest.model_validate(item["import_request"])
-            parsed = read_table(source, str(item['filename']), item.get('worksheet'))
+            parsed = await run_in_threadpool(read_table, source, str(item['filename']), item.get('worksheet'), selection=req.selection)
             if item.get('source_format', parsed['source_format']) != parsed['source_format']:
                 raise ImportProblem("项目源文件格式与文件名不一致")
             report, ds = validate(parsed, req)
