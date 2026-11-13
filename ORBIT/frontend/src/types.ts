@@ -207,6 +207,8 @@ export type ProjectState = {
   trail_s: number;
   scene?: SceneSystem;
   camera?: CameraState;
+  camera_keyframes?: CameraKeyframe[];
+  camera_keyframes_enabled?: boolean;
   stars?: boolean;
 };
 
@@ -228,7 +230,10 @@ export type CameraState = {
   target_km: Vec3;
   up: Vec3;
   follow_id: string | null;
+  fov?: number;
+  zoom?: number;
 };
+export type CameraKeyframe = { id: string; time: number; camera: CameraState };
 export type PlanetInfo = {
   id: BodyId;
   name: string;

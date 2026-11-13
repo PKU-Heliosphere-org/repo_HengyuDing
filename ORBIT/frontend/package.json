@@ -1,12 +1,12 @@
 {
   "name": "orbit-workbench",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
-    "test": "vitest run tests/time.test.ts tests/geometry.test.ts tests/planets.test.ts tests/stateVector.test.ts tests/trail.test.ts tests/renderCache.test.ts",
+    "test": "vitest run tests/time.test.ts tests/geometry.test.ts tests/planets.test.ts tests/stateVector.test.ts tests/trail.test.ts tests/renderCache.test.ts tests/cameraKeyframes.test.ts tests/videoExport.test.ts",
     "test:e2e": "playwright test"
   },
   "dependencies": {

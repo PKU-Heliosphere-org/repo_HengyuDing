@@ -1,7 +1,13 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-export function TimelinePanel({ children }: { children: ReactNode }) {
+export function TimelinePanel({
+  children,
+  extraHeight = 0,
+}: {
+  children: ReactNode;
+  extraHeight?: number;
+}) {
   const panel = useRef<HTMLElement>(null);
   const drag = useRef<{ y: number; height: number } | null>(null);
   const [height, setHeight] = useState<number | null>(null);
@@ -12,7 +18,11 @@ export function TimelinePanel({ children }: { children: ReactNode }) {
     const cachePanel = parent.querySelector(".render-cache-panel");
     const observer = new ResizeObserver(() => {
       const min =
-        window.innerHeight <= 780 ? 155 : window.innerWidth >= 1600 ? 190 : 174;
+        (window.innerHeight <= 780
+          ? 155
+          : window.innerWidth >= 1600
+            ? 190
+            : 174) + extraHeight;
       const max = Math.max(
         min,
         parent.clientHeight -
@@ -27,7 +37,7 @@ export function TimelinePanel({ children }: { children: ReactNode }) {
     observer.observe(parent);
     if (cachePanel) observer.observe(cachePanel);
     return () => observer.disconnect();
-  }, []);
+  }, [extraHeight]);
   const clamp = (value: number) =>
     Math.max(bounds.min, Math.min(bounds.max, value));
   return (
@@ -35,7 +45,7 @@ export function TimelinePanel({ children }: { children: ReactNode }) {
       ref={panel}
       className="timeline resizable-timeline"
       aria-label="时间轴"
-      style={height === null ? undefined : { height }}
+      style={{ height: height ?? bounds.min, minHeight: bounds.min }}
     >
       <div
         className="timeline-resizer"

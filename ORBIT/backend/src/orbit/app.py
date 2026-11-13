@@ -24,9 +24,11 @@ from .models import CENTERS, ImportRequest, ImportSelection, PreviewRequest, Str
 from .table_reader import MAX_SOURCE_BYTES
 from .reduction_tasks import ReductionTask, ACTIVE
 from . import planets
+from .video_exports import router as video_router
 
 ROOT = Path(__file__).resolve().parents[3]
 app = FastAPI(title="ORBIT", version=__version__)
+app.include_router(video_router)
 imports: dict = {}
 datasets: dict = {}
 MAX_PROJECT_BYTES = 512 * 1024 * 1024
@@ -330,9 +332,10 @@ def validate_project_state(state, dataset_map):
         value = state.get(key)
         if not isinstance(value, (int,float)) or not math.isfinite(value) or not 0 < value <= 1e16:
             raise ImportProblem("显示半径或尾迹时长无效")
-    camera = state.get("camera")
-    if camera is not None:
+    def validate_camera(camera, keyframe=False):
         try:
+            if not isinstance(camera,dict):
+                raise ValueError()
             for field in ["position_km","target_km","up"]:
                 vector = camera[field]
                 if not isinstance(vector,list) or len(vector)!=3 or not all(type(v) in (float,int) and math.isfinite(v) for v in vector):
@@ -341,8 +344,39 @@ def validate_project_state(state, dataset_map):
                 raise ValueError()
             if camera.get("follow_id") is not None and camera["follow_id"] not in layer_ids:
                 raise ValueError()
+            if keyframe and camera.get("follow_id") is not None:
+                raise ValueError()
+            for field, minimum, maximum in [("fov",1,150),("zoom",0.01,100)]:
+                if field in camera and (type(camera[field]) not in (int,float) or not math.isfinite(camera[field]) or not minimum <= camera[field] <= maximum):
+                    raise ValueError()
+            direction = [camera["position_km"][i]-camera["target_km"][i] for i in range(3)]
+            distance, up_length = math.hypot(*direction), math.hypot(*camera["up"])
+            if not math.isfinite(distance) or not math.isfinite(up_length):
+                raise ValueError()
+            cosine = sum((direction[i]/distance)*(camera["up"][i]/up_length) for i in range(3))
+            if keyframe and abs(cosine) > 1-1e-12:
+                raise ValueError()
         except (KeyError,TypeError,ValueError):
             raise ImportProblem("相机状态无效")
+    camera = state.get("camera")
+    if camera is not None:
+        validate_camera(camera)
+    if "camera_keyframes_enabled" in state and not isinstance(state["camera_keyframes_enabled"],bool):
+        raise ImportProblem("视角关键帧开关无效")
+    if "camera_keyframes" in state:
+        keys = state["camera_keyframes"]
+        if not isinstance(keys,list) or len(keys)>1000:
+            raise ImportProblem("视角关键帧列表无效或超过 1000 帧")
+        key_ids, previous = set(), -math.inf
+        for key in keys:
+            if not isinstance(key,dict) or not isinstance(key.get("id"),str) or not 1 <= len(key["id"]) <= 128 or key["id"] in key_ids:
+                raise ImportProblem("视角关键帧 ID 无效或重复")
+            t = key.get("time")
+            if type(t) not in (int,float) or not math.isfinite(t) or abs(t)>1e12 or t<=previous:
+                raise ImportProblem("视角关键帧时间必须有限、唯一且递增")
+            key_ids.add(key["id"])
+            previous = t
+            validate_camera(key.get("camera"),keyframe=True)
     finite_json(state)
     return state
 

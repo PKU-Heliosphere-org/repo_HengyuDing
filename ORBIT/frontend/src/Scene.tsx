@@ -49,10 +49,18 @@ type Props = {
   system: SceneSystem;
   stars: boolean;
   cameraRestore?: CameraState | null;
+  animatedCamera?: CameraState | null;
+  cameraAnimationPlaying?: boolean;
   onFollow: (id: string | null) => void;
   onError: (error: string) => void;
 };
 export type SceneHandle = {
+  captureFrame: (
+    width: number,
+    height: number,
+    overlay: boolean,
+  ) => Promise<Blob>;
+  restoreCamera: (camera: CameraState) => void;
   exportPng: () => void;
   command: (
     type:
@@ -108,6 +116,7 @@ type Runtime = {
   sunGlow: THREE.Sprite;
   sunMesh: THREE.Mesh;
   center: THREE.Sprite;
+  exportSize?: { width: number; height: number };
 };
 const fromKm = (p: Vec3) =>
   new THREE.Vector3().fromArray(p).divideScalar(AU_KM);
@@ -234,8 +243,12 @@ function captureCamera(r: Runtime): CameraState {
       .clone()
       .multiplyScalar(AU_KM)
       .toArray() as Vec3,
-    up: r.camera.up.toArray() as Vec3,
+    up: new THREE.Vector3(0, 1, 0)
+      .applyQuaternion(r.camera.quaternion)
+      .toArray() as Vec3,
     follow_id: r.followId,
+    fov: r.camera.fov,
+    zoom: r.camera.zoom,
   };
 }
 
@@ -268,7 +281,7 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
       const radius = Math.max(0.000001, r.bound),
         distance =
           (radius * 1.18) /
-          Math.sin(THREE.MathUtils.degToRad(r.camera.fov / 2));
+          Math.sin(THREE.MathUtils.degToRad(r.camera.getEffectiveFOV() / 2));
       r.controls.target.set(0, 0, 0);
       r.controls.minDistance = 1e-10;
       r.camera.up.set(0, 0, 1);
@@ -285,6 +298,17 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
     function command(type: Parameters<SceneHandle["command"]>[0]) {
       const r = runtime.current;
       if (!r) return;
+      if (
+        latest.current.animatedCamera &&
+        latest.current.cameraAnimationPlaying
+      )
+        return;
+      if (type === "follow" && latest.current.animatedCamera) {
+        latest.current.onError(
+          "视角关键帧正在控制相机，请先关闭视角关键帧再启用跟随。",
+        );
+        return;
+      }
       if (["overview", "top", "front", "side"].includes(type)) {
         moveCamera(type as "overview");
         return;
@@ -417,6 +441,7 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
       );
       let lastProps: Props | null = null,
         lastFollowNotified: string | null = null;
+      let appliedCamera: CameraState | null = null;
       const drawnPosition = new THREE.Vector3(Infinity, Infinity, Infinity),
         drawnUp = new THREE.Vector3(),
         drawnTarget = new THREE.Vector3();
@@ -426,6 +451,22 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
           r.dirty = true;
           lastProps = p;
         }
+        controls.enabled = !(p.animatedCamera && p.cameraAnimationPlaying);
+        if (p.animatedCamera && p.animatedCamera !== appliedCamera) {
+          const c = p.animatedCamera;
+          camera.position.copy(fromKm(c.position_km));
+          controls.target.copy(fromKm(c.target_km));
+          camera.up.fromArray(c.up).normalize();
+          camera.fov = c.fov ?? 34;
+          camera.zoom = c.zoom ?? 1;
+          camera.updateProjectionMatrix();
+          camera.lookAt(controls.target);
+          controls.minDistance = 1e-10;
+          r.followId = null;
+          r.lastFollow = null;
+          appliedCamera = c;
+          r.dirty = true;
+        } else if (!p.animatedCamera) appliedCamera = null;
         controls.update();
         // Trackball's fixed change-event epsilon is too large for kilometre-scale views in AU.
         if (
@@ -446,14 +487,14 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
           radius: number;
           id: string;
         }[] = [];
-        const width = host.current?.clientWidth || 1,
-          height = host.current?.clientHeight || 1;
+        const width = r.exportSize?.width ?? (host.current?.clientWidth || 1),
+          height = r.exportSize?.height ?? (host.current?.clientHeight || 1);
         const drawingTolerance = Math.max(
           0.000001,
           ((camera.position.distanceTo(controls.target) *
             AU_KM *
             2 *
-            Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) /
+            Math.tan(THREE.MathUtils.degToRad(camera.getEffectiveFOV() / 2))) /
             height) *
             0.25,
         );
@@ -490,7 +531,9 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
           m.point.scale.setScalar(
             ((m.layer.glowSize ?? DEFAULT_GLOW_SIZE) *
               2 *
-              Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) /
+              Math.tan(
+                THREE.MathUtils.degToRad(camera.getEffectiveFOV() / 2),
+              )) /
               (GLOW_INNER_FRACTION * Math.max(1, height)),
           );
           r.poses.set(m.layer.id, {
@@ -568,7 +611,7 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
               (m.layer.body_id === "saturn" ? 2.33 : 1),
           });
         }
-        if (r.followId) {
+        if (r.followId && !p.animatedCamera) {
           const pose = r.poses.get(r.followId);
           if (pose) {
             if (r.lastFollow) {
@@ -704,7 +747,7 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
           .setLength((695700 / AU_KM) * 1.02);
         const sunDiameter =
           (height * (695700 / AU_KM)) /
-          (Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) *
+          (Math.tan(THREE.MathUtils.degToRad(camera.getEffectiveFOV() / 2)) *
             Math.max(1e-12, camera.position.distanceTo(sun.position)));
         sunGlow.material.opacity =
           1 - THREE.MathUtils.smoothstep(sunDiameter, 8, 80) * 0.8;
@@ -763,7 +806,7 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
           const radiusPx =
             (height * label.radius) /
             (2 *
-              Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) *
+              Math.tan(THREE.MathUtils.degToRad(camera.getEffectiveFOV() / 2)) *
               Math.max(1e-12, camera.position.distanceTo(label.position)));
           const x = Math.max(
             10,
@@ -1054,6 +1097,9 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
       r.camera.position.copy(fromKm(c.position_km));
       r.controls.target.copy(fromKm(c.target_km));
       r.camera.up.fromArray(c.up).normalize();
+      r.camera.fov = c.fov ?? 34;
+      r.camera.zoom = c.zoom ?? 1;
+      r.camera.updateProjectionMatrix();
       r.followId = c.follow_id;
       r.lastFollow = null;
       r.camera.lookAt(r.controls.target);
@@ -1065,6 +1111,85 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
       ref,
       () => ({
         command,
+        restoreCamera(c) {
+          const r = runtime.current;
+          if (!r) return;
+          r.dirty = true;
+          r.draw();
+          r.camera.position.copy(fromKm(c.position_km));
+          r.controls.target.copy(fromKm(c.target_km));
+          r.camera.up.fromArray(c.up).normalize();
+          r.camera.fov = c.fov ?? 34;
+          r.camera.zoom = c.zoom ?? 1;
+          r.camera.updateProjectionMatrix();
+          r.camera.lookAt(r.controls.target);
+          r.followId = c.follow_id;
+          r.lastFollow = null;
+          r.dirty = true;
+          r.draw();
+        },
+        async captureFrame(width, height, overlay) {
+          const r = runtime.current;
+          if (!r) throw new Error("三维场景尚未就绪。");
+          if (
+            !Number.isInteger(width) ||
+            !Number.isInteger(height) ||
+            width < 64 ||
+            height < 64 ||
+            width * height > 1920 * 1080
+          )
+            throw new Error("导出画幅尺寸无效。");
+          await document.fonts.ready;
+          await repository.current?.ready();
+          const oldSize = r.renderer.getSize(new THREE.Vector2());
+          const oldRatio = r.renderer.getPixelRatio();
+          const aspect = r.camera.aspect;
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          try {
+            r.exportSize = { width, height };
+            r.renderer.setPixelRatio(1);
+            r.renderer.setSize(width, height, false);
+            r.camera.aspect = width / height;
+            r.camera.updateProjectionMatrix();
+            r.dirty = true;
+            r.draw();
+            const ctx = canvas.getContext("2d")!;
+            ctx.drawImage(r.renderer.domElement, 0, 0);
+            if (overlay) {
+              const font = Math.max(12, Math.round(height / 55));
+              ctx.font = `${font}px "Noto Sans SC", sans-serif`;
+              ctx.fillStyle = "#d5ddeb";
+              ctx.fillText(latest.current.overlay[0] ?? "ORBIT", 20, font + 15);
+              for (const item of labels.current!.children) {
+                const el = item as HTMLDivElement;
+                if (el.style.display === "none") continue;
+                ctx.fillStyle = el.style.color;
+                ctx.fillText(
+                  el.textContent ?? "",
+                  Number(el.dataset.x),
+                  Number(el.dataset.y) + font,
+                );
+              }
+            }
+          } finally {
+            r.exportSize = undefined;
+            r.renderer.setPixelRatio(oldRatio);
+            r.renderer.setSize(oldSize.x, oldSize.y, false);
+            r.camera.aspect = aspect;
+            r.camera.updateProjectionMatrix();
+            r.dirty = true;
+            r.draw();
+          }
+          return await new Promise<Blob>((resolve, reject) =>
+            canvas.toBlob(
+              (blob) =>
+                blob ? resolve(blob) : reject(new Error("无法生成视频帧。")),
+              "image/png",
+            ),
+          );
+        },
         getCamera() {
           if (runtime.current) {
             runtime.current.dirty = true;

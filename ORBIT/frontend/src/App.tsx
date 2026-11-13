@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import {
   Activity,
   ArrowDownToLine,
@@ -10,6 +11,7 @@ import {
   EyeOff,
   FilePlus2,
   FolderOpen,
+  Film,
   Grid3X3,
   Globe2,
   Move3D,
@@ -38,6 +40,14 @@ import { PlanetInspector } from "./PlanetInspector";
 import { usePlanetWindow } from "./usePlanetWindow";
 import { useRenderCache } from "./useRenderCache";
 import { RenderCachePanel } from "./RenderCachePanel";
+import { CameraKeyframeTrack } from "./CameraKeyframeTrack";
+import { VideoExportDialog } from "./VideoExportDialog";
+import {
+  cameraAt,
+  recordCamera,
+  KEYFRAME_EPSILON,
+  MAX_CAMERA_KEYFRAMES,
+} from "./cameraKeyframes";
 import { planetSnapshot } from "./planetMath";
 import { elementsFromState } from "./stateVector";
 import { OrbitScene } from "./Scene";
@@ -66,6 +76,7 @@ import type {
   ProjectState,
   BodyId,
   CameraState,
+  CameraKeyframe,
   PlanetCatalog,
   SceneSystem,
 } from "./types";
@@ -114,6 +125,16 @@ export default function App() {
   const [start, setStart] = useState(0);
   const [end, setEnd] = useState(0);
   const [cacheEnabled, setCacheEnabled] = useState(false);
+  const [keyframesEnabled, setKeyframesEnabled] = useState(false);
+  const [cameraKeys, setCameraKeys] = useState<CameraKeyframe[]>([]);
+  const [selectedCameraKey, setSelectedCameraKey] = useState<string | null>(
+    null,
+  );
+  const cameraAnimationActive = cacheEnabled && keyframesEnabled;
+  const animatedCamera = useMemo(
+    () => (cameraAnimationActive ? cameraAt(cameraKeys, time) : null),
+    [cameraAnimationActive, cameraKeys, time],
+  );
   const [cacheRange, setCacheRange] = useState<{
     base: string;
     start: number;
@@ -150,6 +171,11 @@ export default function App() {
   const [conic, setConic] = useState<Curve | null>(null);
   const [conicEpoch, setConicEpoch] = useState("");
   const [help, setHelp] = useState(false);
+  const [videoDialog, setVideoDialog] = useState(false);
+  const videoOrigin = useRef<{
+    time: number;
+    camera: CameraState | null;
+  } | null>(null);
   const [showParams, setShowParams] = useState(true);
   const [system, setSystem] = useState<SceneSystem>({
     center: "sun",
@@ -363,6 +389,7 @@ export default function App() {
         ) ||
         importing ||
         planetDialog ||
+        videoDialog ||
         help
       )
         return;
@@ -373,7 +400,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [togglePlay, importing, help, planetDialog]);
+  }, [togglePlay, importing, help, planetDialog, videoDialog]);
 
   function patchLayer(id: string, patch: Partial<Layer>) {
     setLayers((ls) => ls.map((l) => (l.id === id ? { ...l, ...patch } : l)));
@@ -514,6 +541,9 @@ export default function App() {
       setPlaying(false);
       setCacheEnabled(false);
       setCacheRange(null);
+      setCameraKeys([]);
+      setKeyframesEnabled(false);
+      setSelectedCameraKey(null);
       setBase("");
       setTime(0);
       setStart(0);
@@ -529,6 +559,9 @@ export default function App() {
     setDatasets([]);
     setCacheEnabled(false);
     setCacheRange(null);
+    setCameraKeys([]);
+    setKeyframesEnabled(false);
+    setSelectedCameraKey(null);
     setLayers([]);
     setSelected(null);
     setBase("");
@@ -558,6 +591,8 @@ export default function App() {
         scene: system,
         stars,
         camera: scene.current?.getCamera() || undefined,
+        camera_keyframes: cameraKeys,
+        camera_keyframes_enabled: keyframesEnabled,
       };
       const project = await post<unknown>("/projects/export", {
         dataset_ids: datasets.map((d) => d.id),
@@ -592,6 +627,9 @@ export default function App() {
         { method: "POST", body },
       );
       const s = restored.state;
+      setCameraKeys(s.camera_keyframes ?? []);
+      setKeyframesEnabled(s.camera_keyframes_enabled ?? false);
+      setSelectedCameraKey(null);
       setCacheEnabled(false);
       setCacheRange(null);
       setSystem(
@@ -639,6 +677,51 @@ export default function App() {
       setBusy(false);
       if (openProject.current) openProject.current.value = "";
     }
+  }
+  function addCameraKey(at: number) {
+    if (!cameraAnimationActive || !renderCache.ready) return;
+    const existing = cameraKeys.find(
+      (k) => Math.abs(k.time - at) < KEYFRAME_EPSILON,
+    );
+    if (!existing && cameraKeys.length >= MAX_CAMERA_KEYFRAMES) return;
+    const camera = scene.current?.getCamera();
+    if (!camera) return;
+    const id = existing?.id ?? crypto.randomUUID();
+    setPlaying(false);
+    setCameraKeys((keys) => recordCamera(keys, at, camera, id));
+    setSelectedCameraKey(id);
+    setTime(at);
+  }
+  function selectCameraKey(id: string) {
+    const key = cameraKeys.find((k) => k.id === id);
+    if (!key) return;
+    setPlaying(false);
+    setSelectedCameraKey(id);
+    if (key.time >= playbackStart && key.time <= playbackEnd) {
+      setTime(key.time);
+      setCameraRestore({ ...key.camera, follow_id: null });
+    }
+  }
+  function moveCameraKey(id: string, at: number) {
+    if (
+      cameraKeys.some(
+        (k) => k.id !== id && Math.abs(k.time - at) < KEYFRAME_EPSILON,
+      )
+    )
+      return;
+    setPlaying(false);
+    setCameraKeys((keys) =>
+      keys
+        .map((k) => (k.id === id ? { ...k, time: at } : k))
+        .sort((a, b) => a.time - b.time),
+    );
+    setSelectedCameraKey(id);
+    setTime(at);
+  }
+  function deleteCameraKey() {
+    setPlaying(false);
+    setCameraKeys((keys) => keys.filter((k) => k.id !== selectedCameraKey));
+    setSelectedCameraKey(null);
   }
   function startEditing() {
     if (!displayedElements) return;
@@ -784,7 +867,7 @@ export default function App() {
             <i />
             本地运行
           </span>
-          <span className="version">v0.3</span>
+          <span className="version">v0.4</span>
           <Tool label="使用说明" onClick={() => setHelp(true)}>
             <CircleHelp size={18} />
           </Tool>
@@ -870,6 +953,17 @@ export default function App() {
           >
             <ArrowDownToLine size={15} />
             导出 PNG
+          </button>
+          <button
+            className="quiet compact"
+            disabled={!layers.length || busy}
+            onClick={() => {
+              setPlaying(false);
+              setVideoDialog(true);
+            }}
+          >
+            <Film size={16} />
+            导出视频
           </button>
         </div>
       </div>
@@ -1186,6 +1280,8 @@ export default function App() {
               planetWindow={planetData}
               planetTrails={trailData}
               cameraRestore={cameraRestore}
+              animatedCamera={animatedCamera}
+              cameraAnimationPlaying={playing}
               onFollow={setFollowing}
               onError={setError}
               overlay={[
@@ -1442,8 +1538,13 @@ export default function App() {
             progress={renderCache.progress}
             error={renderCache.error}
             onRetry={renderCache.retry}
+            keyframesEnabled={keyframesEnabled}
+            onKeyframesEnabled={(enabled) => {
+              setPlaying(false);
+              setKeyframesEnabled(enabled);
+            }}
           />
-          <TimelinePanel>
+          <TimelinePanel extraHeight={cameraAnimationActive ? 56 : 0}>
             <div className="timeline-heading">
               <div>
                 <Activity size={14} />
@@ -1483,6 +1584,28 @@ export default function App() {
                 </span>
               ))}
             </div>
+            {cameraAnimationActive && (
+              <CameraKeyframeTrack
+                keys={cameraKeys}
+                selected={selectedCameraKey}
+                time={time}
+                start={start}
+                end={end}
+                from={playbackStart}
+                to={playbackEnd}
+                base={base}
+                leaps={leaps}
+                disabled={!renderCache.ready || playing}
+                onAdd={addCameraKey}
+                onSelect={selectCameraKey}
+                onMove={moveCameraKey}
+                onDelete={deleteCameraKey}
+                onSeek={(at) => {
+                  setPlaying(false);
+                  setTime(at);
+                }}
+              />
+            )}
             <div className="timeline-tracks">
               {layers
                 .filter((l) => l.kind === "dataset")
@@ -1690,6 +1813,41 @@ export default function App() {
           busy={busy}
           onClose={() => setPlanetDialog(false)}
           onAdd={addPlanets}
+        />
+      )}
+      {videoDialog && (
+        <VideoExportDialog
+          from={cacheFrom}
+          to={cacheTo}
+          rangeLabel={`${base ? utcLabel(base, cacheFrom, leaps) : "—"} → ${base ? utcLabel(base, cacheTo, leaps) : "—"}`}
+          canExport={cacheEnabled && renderCache.ready && cacheTo > cacheFrom}
+          onClose={() => setVideoDialog(false)}
+          onBegin={() => {
+            setPlaying(false);
+            videoOrigin.current = {
+              time,
+              camera: scene.current?.getCamera() ?? null,
+            };
+          }}
+          onEnd={() => {
+            const origin = videoOrigin.current;
+            if (origin) {
+              flushSync(() => setTime(origin.time));
+              if (origin.camera) scene.current?.restoreCamera(origin.camera);
+            }
+            videoOrigin.current = null;
+          }}
+          onPreview={(width, height, overlay) => {
+            if (!scene.current)
+              return Promise.reject(new Error("三维场景尚未就绪。"));
+            return scene.current.captureFrame(width, height, overlay);
+          }}
+          onFrame={(t, width, height, overlay) => {
+            flushSync(() => setTime(t));
+            if (!scene.current)
+              return Promise.reject(new Error("三维场景尚未就绪。"));
+            return scene.current.captureFrame(width, height, overlay);
+          }}
         />
       )}
       {help && (

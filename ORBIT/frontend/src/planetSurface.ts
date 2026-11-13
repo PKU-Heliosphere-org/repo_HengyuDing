@@ -48,21 +48,41 @@ export function textureRepository(
 ) {
   const textures = new Map<string, THREE.Texture>();
   const loader = new THREE.TextureLoader();
+  const loads: Promise<void>[] = [];
+  const failures: string[] = [];
   return {
     get(name: string) {
       let texture = textures.get(name);
       if (!texture) {
+        let complete!: () => void;
+        loads.push(
+          new Promise<void>((resolve) => {
+            complete = resolve;
+          }),
+        );
         texture = loader.load(
           "/textures/" + name,
-          () => invalidate(),
+          () => {
+            complete();
+            invalidate();
+          },
           undefined,
-          () => onError("无法加载纹理：" + name),
+          () => {
+            failures.push(name);
+            complete();
+            onError("无法加载纹理：" + name);
+          },
         );
         texture.colorSpace = THREE.SRGBColorSpace;
         texture.anisotropy = 4;
         textures.set(name, texture);
       }
       return texture;
+    },
+    async ready() {
+      await Promise.all(loads);
+      if (failures.length)
+        throw new Error("纹理尚未就绪：" + failures.join("、"));
     },
     dispose() {
       textures.forEach((t) => t.dispose());
@@ -83,7 +103,7 @@ export class PlanetVisual {
   constructor(
     public id: BodyId,
     color: string,
-    repository: TextureRepository,
+    repository: Pick<TextureRepository, "get">,
     glowMap: THREE.Texture,
   ) {
     const day = repository.get(id === "earth" ? "earth_day.jpg" : id + ".jpg");
@@ -186,7 +206,7 @@ export class PlanetVisual {
     const distance = camera.position.distanceTo(this.root.position);
     const pixels =
       (height * (this.radiusKm / AU_KM)) /
-      (Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) *
+      (Math.tan(THREE.MathUtils.degToRad(camera.getEffectiveFOV() / 2)) *
         Math.max(distance, 1e-14));
     this.glow.position
       .copy(camera.position)
@@ -198,7 +218,9 @@ export class PlanetVisual {
     this.glow.visible = blend < 0.999;
     this.glow.material.opacity = (1 - blend) * 0.9;
     this.glow.scale.setScalar(
-      (glowSize * 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) /
+      (glowSize *
+        2 *
+        Math.tan(THREE.MathUtils.degToRad(camera.getEffectiveFOV() / 2))) /
         (GLOW_INNER_FRACTION * Math.max(1, height)),
     );
     this.meridian.visible = showMeridian && this.id === "earth" && blend > 0.5;

@@ -16,6 +16,8 @@ export function RenderCachePanel({
   error,
   onRetry,
   disabled,
+  keyframesEnabled,
+  onKeyframesEnabled,
 }: {
   enabled: boolean;
   onEnabled: (enabled: boolean) => void;
@@ -31,6 +33,8 @@ export function RenderCachePanel({
   error: string;
   onRetry: () => void;
   disabled: boolean;
+  keyframesEnabled: boolean;
+  onKeyframesEnabled: (enabled: boolean) => void;
 }) {
   const label = (time: number) =>
     base && leaps.length
@@ -51,6 +55,18 @@ export function RenderCachePanel({
             onChange={(e) => onEnabled(e.target.checked)}
           />
           启用缓存渲染
+        </label>
+        <label
+          className={!enabled ? "disabled" : ""}
+          title="启用缓存渲染后可记录和播放相机关键帧"
+        >
+          <input
+            type="checkbox"
+            checked={enabled && keyframesEnabled}
+            disabled={!enabled}
+            onChange={(e) => onKeyframesEnabled(e.target.checked)}
+          />
+          视角关键帧
         </label>
         {enabled && (
           <span role="status" className={error ? "cache-error" : ""}>
