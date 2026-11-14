@@ -1,5 +1,15 @@
 # Local reference assets and Codex working documents
 /codex/
+# Local source tables, ephemeris kernels, and projects containing original data.
+# Test data is generated from artificial values at runtime, not committed as tables.
+*.[cC][sS][vV]
+*.[xX][lL][sS]
+*.[xX][lL][sS][xX]
+*.[xX][lL][sS][mM]
+*.[bB][sS][pP]
+*.[tT][pP][cC]
+*.[tT][lL][sS]
+*.[oO][rR][bB][iI][tT].[jJ][sS][oO][nN]
 **/.codex/
 **/.agents/
 **/AGENTS.md

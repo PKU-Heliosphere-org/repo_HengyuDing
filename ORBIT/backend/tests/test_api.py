@@ -53,6 +53,8 @@ def test_project_roundtrip_recomputes_and_preserves_provenance():
 
 
 def test_structured_errors_and_no_nonfinite_preview():
+    assert '/api/v1/examples/sample' not in client.get('/openapi.json').json()['paths']
+    assert client.get('/api/v1/examples/sample').status_code==404
     assert client.get('/api/v1/health').json()['propagation'] is False
     assert client.get('/api/v1/datasets/missing/samples').status_code==404
     bad={'elements':{'a':7000,'e':1,'i':0,'raan':0,'arg_periapsis':0,'true_anomaly':0},'metadata':{},'radius_km':100000}

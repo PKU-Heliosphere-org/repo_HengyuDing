@@ -76,7 +76,7 @@ export type Sample = {
 export type Dataset = {
   id: string;
   filename: string;
-  source_format?: "csv" | "xlsx";
+  source_format?: "csv" | "xlsx" | "bsp";
   worksheet?: string | null;
   input_type?: InputType;
   velocity_source?: "elements" | "provided" | "finite_difference";

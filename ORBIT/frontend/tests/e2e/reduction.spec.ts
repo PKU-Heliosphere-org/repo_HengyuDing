@@ -19,7 +19,7 @@ test("oversized row count can be retried, cropped, resampled and restored withou
   await page.goto("/");
   await page.getByRole("button", { name: "导入数据", exact: true }).click();
   await page
-    .getByLabel("选择CSV或XLSX")
+    .getByLabel("选择CSV、XLSX或BSP")
     .setInputFiles({
       name: "large.csv",
       mimeType: "text/csv",
@@ -99,7 +99,7 @@ test("files above 20 MiB offer time selection instead of upload rejection", asyn
   await page.goto("/");
   await page.getByRole("button", { name: "导入数据", exact: true }).click();
   await page
-    .getByLabel("选择CSV或XLSX")
+    .getByLabel("选择CSV、XLSX或BSP")
     .setInputFiles({
       name: "over-20MiB.csv",
       mimeType: "text/csv",

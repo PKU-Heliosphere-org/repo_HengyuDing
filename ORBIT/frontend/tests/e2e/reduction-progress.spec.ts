@@ -30,7 +30,7 @@ test("cancelling while total is unknown stops the indeterminate bar", async ({
   await page.goto("/");
   await page.getByRole("button", { name: "导入数据", exact: true }).click();
   await page
-    .getByLabel("选择CSV或XLSX")
+    .getByLabel("选择CSV、XLSX或BSP")
     .setInputFiles({
       name: "count.csv",
       mimeType: "text/csv",
@@ -108,7 +108,7 @@ test("progress stays below 100 until completion; cancel keeps settings and retry
   );
   await page.goto("/");
   await page.getByRole("button", { name: "导入数据", exact: true }).click();
-  await page.getByLabel("选择CSV或XLSX").setInputFiles({
+  await page.getByLabel("选择CSV、XLSX或BSP").setInputFiles({
     name: "progress.csv",
     mimeType: "text/csv",
     buffer: Buffer.from(csv),

@@ -5,7 +5,7 @@ import path from "node:path";
 async function inspect(page: Page, csv: string) {
   await page.goto("/");
   await page.getByRole("button", { name: "导入数据", exact: true }).click();
-  await page.getByLabel("选择CSV或XLSX").setInputFiles({
+  await page.getByLabel("选择CSV、XLSX或BSP").setInputFiles({
     name: "state.csv",
     mimeType: "text/csv",
     buffer: Buffer.from(csv),

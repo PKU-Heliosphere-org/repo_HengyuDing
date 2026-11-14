@@ -495,23 +495,6 @@ export default function App() {
     setPlanetDialog(false);
     setStatus("已添加 " + added.length + " 个行星图层");
   }
-  async function loadSample() {
-    setBusy(true);
-    setError("");
-    try {
-      const response = await fetch("/api/v1/examples/sample");
-      if (!response.ok) throw new Error("未找到样例文件");
-      const blob = await response.blob();
-      setInitialFile(
-        new File([blob], "参考星历表_Sat_ELEMENTS.csv", { type: "text/csv" }),
-      );
-      setImporting(true);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
   function removeLayer(id: string) {
     const next = layers.filter((l) => l.id !== id);
     setLayers(next);
@@ -645,7 +628,7 @@ export default function App() {
       setDatasets(restored.datasets);
       setLayers(s.layers);
       setSelected(
-        s.layers.some((l) => l.id === s.selected)
+        s.selected === null || s.layers.some((l) => l.id === s.selected)
           ? s.selected
           : (s.layers[0]?.id ?? null),
       );
@@ -867,7 +850,7 @@ export default function App() {
             <i />
             本地运行
           </span>
-          <span className="version">v0.4</span>
+          <span className="version">v0.5</span>
           <Tool label="使用说明" onClick={() => setHelp(true)}>
             <CircleHelp size={18} />
           </Tool>
@@ -990,7 +973,7 @@ export default function App() {
               <div className="empty-layers">
                 <span className="small-orbit" />
                 <p>尚未添加对象</p>
-                <span>导入 CSV / XLSX，构建你的轨道场景</span>
+                <span>导入 CSV / XLSX / BSP，构建你的轨道场景</span>
               </div>
             )}
             {layers.map((l, i) => (
@@ -1283,6 +1266,7 @@ export default function App() {
               animatedCamera={animatedCamera}
               cameraAnimationPlaying={playing}
               onFollow={setFollowing}
+              onSelect={setSelected}
               onError={setError}
               overlay={[
                 "ORBIT · " + (utc === "—" ? "静态场景" : niceDate(utc)),
@@ -1426,7 +1410,7 @@ export default function App() {
                     }}
                   >
                     <Upload size={15} />
-                    导入 CSV / XLSX
+                    导入 CSV / XLSX / BSP
                   </button>
                   <button
                     className="quiet"
@@ -1434,13 +1418,6 @@ export default function App() {
                   >
                     <Globe2 size={15} />
                     添加行星
-                  </button>
-                  <button
-                    className="quiet"
-                    onClick={loadSample}
-                    disabled={busy}
-                  >
-                    打开样例 <ChevronRight size={14} />
                   </button>
                 </div>
                 <span className="empty-caption">
@@ -1864,7 +1841,8 @@ export default function App() {
             </header>
             <ol>
               <li>
-                导入 CSV / XLSX，选择中心天体、坐标系、根数历元和时间体系。
+                导入 CSV / XLSX /
+                BSP，选择中心天体、坐标系、根数历元和时间体系。
               </li>
               <li>
                 运行预检。确认完全重复去重，逐组选取冲突记录，再次预检后添加。

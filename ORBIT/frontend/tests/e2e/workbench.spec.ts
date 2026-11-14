@@ -1,20 +1,42 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { existsSync } from "node:fs";
 
-test("sample import, explicit conflict, playback, hypothesis and portable project", async ({
+test("synthetic CSV import, explicit conflict, playback, hypothesis and portable project", async ({
   page,
 }) => {
-  test.skip(
-    !existsSync(path.resolve("../codex/examples/参考星历表_Sat_ELEMENTS.csv")),
-    "本地参考样例未随仓库提供",
-  );
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("/");
   await expect(page.getByText("本地服务已连接")).toBeVisible();
-  await page.getByRole("button", { name: "打开样例" }).click();
+  await expect(page.getByRole("button", { name: "打开样例" })).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "导入 CSV / XLSX / BSP", exact: true })
+    .click();
+  const header = "epoch,a,e,i,raan,arg_periapsis,true_anomaly\n";
+  const records = [
+    [1, 0],
+    [2, 10],
+    [2, 10],
+    [3, 20],
+    [3, 25],
+    [4, 30],
+  ];
+  const csv =
+    header +
+    records
+      .map(
+        ([day, anomaly]) =>
+          `2026-01-0${day}T00:00:00Z,149597870.7,0.2,10,30,20,${anomaly}\n`,
+      )
+      .join("");
+  await page
+    .getByLabel("选择CSV、XLSX或BSP")
+    .setInputFiles({
+      name: "synthetic-orbit.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from(csv),
+    });
   await page.getByRole("button", { name: "读取文件" }).click();
   await expect(
     page.getByRole("dialog", { name: "导入轨道数据" }),
@@ -26,12 +48,12 @@ test("sample import, explicit conflict, playback, hypothesis and portable projec
   ).toBeVisible();
   await page.getByLabel("确认完全重复记录去重，并保留日志").check();
   await page.getByRole("button", { name: "运行预检" }).click();
-  await page.getByRole("radio", { name: "保留行 815", exact: false }).check();
+  await page.getByRole("radio", { name: "保留行 6", exact: false }).check();
   await page.getByRole("button", { name: "运行预检" }).click();
   await expect(page.getByText("预检结果 · 可导入")).toBeVisible();
   await page.getByRole("button", { name: "添加到场景" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect(page.getByText("已导入 8,731 个有效采样点")).toBeVisible();
+  await expect(page.getByText("已导入 4 个有效采样点")).toBeVisible();
   await expect(page.getByText("参考系为暂用假设")).toBeVisible();
   await expect(page.locator("canvas")).toBeVisible();
   await page.screenshot({ path: "test-results/orbit-v0.1-workbench.png" });
@@ -43,11 +65,15 @@ test("sample import, explicit conflict, playback, hypothesis and portable projec
   await page.getByRole("button", { name: "暂停", exact: true }).click();
   await page.getByRole("button", { name: "编辑参数", exact: true }).click();
   await page.getByLabel("编辑e", { exact: true }).fill("0.8");
-  // Current sample can be hyperbolic; use a positive a for this elliptic hypothesis.
+  // Use explicit elliptic parameters for this static hypothesis.
   await page.getByLabel("编辑a", { exact: true }).fill("240000000");
-  const previewRequest = page.waitForRequest((r) => r.url().endsWith("/orbits/preview"));
+  const previewRequest = page.waitForRequest((r) =>
+    r.url().endsWith("/orbits/preview"),
+  );
   await page.getByRole("button", { name: "计算预览", exact: true }).click();
-  expect((await previewRequest).postDataJSON().radius_km).toBe(100 * 149597870.7);
+  expect((await previewRequest).postDataJSON().radius_km).toBe(
+    100 * 149597870.7,
+  );
   await expect(
     page.getByRole("button", { name: "另存假设图层" }),
   ).toBeVisible();
@@ -90,10 +116,12 @@ test("sample import, explicit conflict, playback, hypothesis and portable projec
 
 test("incompatible center cannot be silently overlaid", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "导入 CSV / XLSX", exact: true }).click();
+  await page
+    .getByRole("button", { name: "导入 CSV / XLSX / BSP", exact: true })
+    .click();
   const csv =
     "epoch,a,e,i,raan,arg_periapsis,true_anomaly\n2026-01-01T00:00:00Z,7000,0.1,30,10,20,0\n";
-  await page.getByLabel("选择CSV或XLSX").setInputFiles({
+  await page.getByLabel("选择CSV、XLSX或BSP").setInputFiles({
     name: "one.csv",
     mimeType: "text/csv",
     buffer: Buffer.from(csv),
@@ -102,7 +130,7 @@ test("incompatible center cannot be silently overlaid", async ({ page }) => {
   await page.getByRole("button", { name: "运行预检" }).click();
   await page.getByRole("button", { name: "添加到场景" }).click();
   await page.getByRole("button", { name: "导入数据", exact: true }).click();
-  await page.getByLabel("选择CSV或XLSX").setInputFiles({
+  await page.getByLabel("选择CSV、XLSX或BSP").setInputFiles({
     name: "two.csv",
     mimeType: "text/csv",
     buffer: Buffer.from(csv),

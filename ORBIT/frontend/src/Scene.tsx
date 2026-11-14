@@ -52,6 +52,7 @@ type Props = {
   animatedCamera?: CameraState | null;
   cameraAnimationPlaying?: boolean;
   onFollow: (id: string | null) => void;
+  onSelect: (id: string | null) => void;
   onError: (error: string) => void;
 };
 export type SceneHandle = {
@@ -256,6 +257,7 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
   function OrbitScene(props, ref) {
     const host = useRef<HTMLDivElement>(null),
       labels = useRef<HTMLDivElement>(null),
+      selection = useRef<HTMLDivElement>(null),
       runtime = useRef<Runtime | null>(null),
       latest = useRef(props);
     latest.current = props;
@@ -433,6 +435,164 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
         center,
       };
       runtime.current = r;
+      // Pick the body, never its trajectory or label. Small glows have a forgiving
+      // screen-space target; resolved planets use an actual ray/sphere intersection.
+      const pick = (clientX: number, clientY: number) => {
+        r.draw();
+        const rect = renderer.domElement.getBoundingClientRect();
+        const x = clientX - rect.left,
+          y = clientY - rect.top;
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(
+          new THREE.Vector2(
+            (2 * x) / rect.width - 1,
+            1 - (2 * y) / rect.height,
+          ),
+          camera,
+        );
+        const ray = raycaster.ray;
+        let best: { id: string; distance: number; offset: number } | null =
+          null;
+        let obstruction = Infinity;
+        const intersection = new THREE.Vector3();
+        if (
+          sun.visible &&
+          ray.intersectSphere(
+            new THREE.Sphere(sun.position, 695700 / AU_KM),
+            intersection,
+          )
+        )
+          obstruction = ray.origin.distanceTo(intersection);
+        for (const [id, pose] of r.poses) {
+          const layer = latest.current.layers.find((l) => l.id === id);
+          if (!layer?.visible) continue;
+          const projected = pose.position.clone().project(camera);
+          let distance = Infinity,
+            offset = 0;
+          if (
+            layer.kind === "planet" &&
+            ray.intersectSphere(
+              new THREE.Sphere(pose.position, pose.radius),
+              intersection,
+            )
+          ) {
+            distance = ray.origin.distanceTo(intersection);
+          } else if (projected.z >= -1 && projected.z <= 1) {
+            offset = Math.hypot(
+              ((projected.x + 1) * rect.width) / 2 - x,
+              ((1 - projected.y) * rect.height) / 2 - y,
+            );
+            if (
+              offset <=
+              Math.max(10, (layer.glowSize ?? DEFAULT_GLOW_SIZE) / 2 + 3)
+            )
+              distance = camera.position.distanceTo(pose.position);
+          }
+          if (
+            distance < obstruction &&
+            (!best ||
+              distance < best.distance - 1e-10 ||
+              (Math.abs(distance - best.distance) < 1e-10 &&
+                offset < best.offset))
+          )
+            best = { id, distance, offset };
+        }
+        return best?.id ?? null;
+      };
+      let gesture: {
+        id: number;
+        x: number;
+        y: number;
+        moved: boolean;
+        at: number;
+      } | null = null;
+      let previousClick: {
+        id: string | null;
+        x: number;
+        y: number;
+        at: number;
+      } | null = null;
+      const cancelGesture = () => {
+        gesture = null;
+        previousClick = null;
+      };
+      const pointerDown = (event: PointerEvent) => {
+        if (!event.isPrimary || event.button !== 0 || gesture) {
+          cancelGesture();
+          return;
+        }
+        gesture = {
+          id: event.pointerId,
+          x: event.clientX,
+          y: event.clientY,
+          moved: false,
+          at: event.timeStamp,
+        };
+      };
+      const pointerMove = (event: PointerEvent) => {
+        if (
+          gesture?.id === event.pointerId &&
+          Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 5
+        )
+          gesture.moved = true;
+      };
+      const pointerUp = (event: PointerEvent) => {
+        const down = gesture;
+        gesture = null;
+        if (
+          !down ||
+          down.id !== event.pointerId ||
+          event.button !== 0 ||
+          down.moved ||
+          event.timeStamp - down.at > 700 ||
+          Math.hypot(event.clientX - down.x, event.clientY - down.y) > 5
+        ) {
+          previousClick = null;
+          return;
+        }
+        const id = pick(event.clientX, event.clientY),
+          at = event.timeStamp;
+        latest.current.onSelect(id);
+        if (
+          previousClick &&
+          previousClick.id === id &&
+          at - previousClick.at <= 500 &&
+          Math.hypot(
+            event.clientX - previousClick.x,
+            event.clientY - previousClick.y,
+          ) <= 6
+        ) {
+          previousClick = null;
+          if (id === null) {
+            notifyFollow(r, null);
+            controls.minDistance = 1e-10;
+            return;
+          }
+          if (latest.current.animatedCamera) {
+            latest.current.onError(
+              "视角关键帧正在控制相机，请先关闭视角关键帧再启用跟随。",
+            );
+            return;
+          }
+          const pose = r.poses.get(id);
+          if (!pose) return;
+          const offset = camera.position.clone().sub(controls.target);
+          controls.target.copy(pose.position);
+          camera.position.copy(pose.position).add(offset);
+          notifyFollow(r, id);
+          r.lastFollow = pose.position.clone();
+          controls.minDistance = Math.max(pose.radius * 1.025, 1e-10);
+          camera.lookAt(controls.target);
+          controls.update();
+          r.dirty = true;
+        } else previousClick = { id, x: event.clientX, y: event.clientY, at };
+      };
+      renderer.domElement.addEventListener("pointerdown", pointerDown);
+      renderer.domElement.addEventListener("pointermove", pointerMove);
+      renderer.domElement.addEventListener("pointerup", pointerUp);
+      renderer.domElement.addEventListener("pointercancel", cancelGesture);
+      renderer.domElement.addEventListener("wheel", cancelGesture);
+      window.addEventListener("blur", cancelGesture);
       repository.current = textureRepository(
         () => {
           r.dirty = true;
@@ -786,6 +946,45 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
           camera.updateProjectionMatrix();
         }
         camera.updateMatrixWorld();
+        if (selection.current && !r.exportSize) {
+          const indicator = selection.current;
+          const pose = p.selected ? r.poses.get(p.selected) : undefined;
+          const projected = pose?.position.clone().project(camera);
+          indicator.style.display = "none";
+          if (
+            pose &&
+            projected &&
+            projected.z >= -1 &&
+            projected.z <= 1 &&
+            Math.abs(projected.x) <= 1.1 &&
+            Math.abs(projected.y) <= 1.1
+          ) {
+            const layer = p.layers.find((l) => l.id === p.selected);
+            const radiusPx =
+              layer?.kind === "planet"
+                ? (height * pose.radius) /
+                  (2 *
+                    Math.tan(
+                      THREE.MathUtils.degToRad(camera.getEffectiveFOV() / 2),
+                    ) *
+                    Math.max(1e-12, camera.position.distanceTo(pose.position)))
+                : 0;
+            const diameter = Math.max(
+              42,
+              ((radiusPx * 2 + 18) * 64) / 44,
+              (((layer?.glowSize ?? DEFAULT_GLOW_SIZE) + 18) * 64) / 44,
+            );
+            indicator.style.display = "block";
+            indicator.style.left = `${((projected.x + 1) * width) / 2}px`;
+            indicator.style.top = `${((1 - projected.y) * height) / 2}px`;
+            indicator.style.width = indicator.style.height = `${diameter}px`;
+            indicator.dataset.layerId = p.selected!;
+            indicator.setAttribute(
+              "aria-label",
+              `已选中：${layer?.name ?? "天体"}`,
+            );
+          }
+        }
         const occupied: { x: number; y: number; width: number }[] = [];
         pendingLabels.sort(
           (a, b) => Number(b.id === p.selected) - Number(a.id === p.selected),
@@ -870,6 +1069,12 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
       return () => {
         cancelAnimationFrame(frame);
         observer.disconnect();
+        renderer.domElement.removeEventListener("pointerdown", pointerDown);
+        renderer.domElement.removeEventListener("pointermove", pointerMove);
+        renderer.domElement.removeEventListener("pointerup", pointerUp);
+        renderer.domElement.removeEventListener("pointercancel", cancelGesture);
+        renderer.domElement.removeEventListener("wheel", cancelGesture);
+        window.removeEventListener("blur", cancelGesture);
         controls.dispose();
         disposeContent(content);
         disposeContent(sun);
@@ -1234,6 +1439,22 @@ export const OrbitScene = forwardRef<SceneHandle, Props>(
     return (
       <div className="scene-host" ref={host} aria-label="自由视角三维画布">
         <div className="scene-labels" ref={labels} />
+        <div
+          className="body-selection"
+          ref={selection}
+          role="img"
+          aria-label="天体选中标记"
+          style={{ display: "none" }}
+        >
+          <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
+            <path d="M53.25 26.31a22 22 0 0 0-15.56-15.56M26.31 10.75a22 22 0 0 0-15.56 15.56M10.75 37.69a22 22 0 0 0 15.56 15.56M37.69 53.25a22 22 0 0 0 15.56-15.56" />
+            <path d="M14 16l5 5M45 43l5 5M16 50l5-5M43 19l5-5" />
+            <path
+              className="selection-inner"
+              d="M18 27a15 15 0 0 1 9-9M37 46a15 15 0 0 0 9-9"
+            />
+          </svg>
+        </div>
         {props.grid && props.layers.length > 0 && (
           <div className="scene-scale">
             参考外环半径 {scale.toPrecision(4)} AU

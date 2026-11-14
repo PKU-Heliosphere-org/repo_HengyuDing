@@ -700,6 +700,37 @@ code,
     0 0 8px #000;
   letter-spacing: 0.3px;
 }
+.body-selection {
+  position: absolute;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  color: #c7d3ec;
+  filter: drop-shadow(0 0 3px #a9b9df99);
+}
+.body-selection svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  animation: body-selection-spin 8s linear infinite;
+}
+.body-selection .selection-inner {
+  opacity: 0.45;
+  stroke-width: 1;
+}
+.body-selection svg * {
+  vector-effect: non-scaling-stroke;
+}
+@keyframes body-selection-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(-360deg);
+  }
+}
 .view-corner {
   position: absolute;
   left: 26px;

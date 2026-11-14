@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { X, Upload, Check, AlertTriangle, ArrowRight } from "lucide-react";
 import { api, post } from "./api";
+import { SpkImportDialog } from "./SpkImportDialog";
+import type { SpkInspection } from "./SpkImportDialog";
 import { defaultMetadata, elementFields, stateFields, titles } from "./types";
 import type {
   Dataset,
@@ -32,6 +34,7 @@ const freshDecisions = (): Decisions => ({
 export function ImportDialog({ initialFile, scene, onClose, onImport }: Props) {
   const [file, setFile] = useState<File | undefined>(initialFile);
   const [inspection, setInspection] = useState<Inspection | null>(null);
+  const [spk, setSpk] = useState<SpkInspection | null>(null);
   const [worksheets, setWorksheets] = useState<string[]>([]);
   const [worksheet, setWorksheet] = useState("");
   const [mapping, setMapping] = useState<Record<string, string>>({});
@@ -94,6 +97,8 @@ export function ImportDialog({ initialFile, scene, onClose, onImport }: Props) {
     [],
   );
   function resetInspection() {
+    if (spk) void api(`/imports/${spk.id}`, { method: "DELETE" });
+    setSpk(null);
     if (inspection) void api(`/imports/${inspection.id}`, { method: "DELETE" });
     setInspection(null);
     setMapping({});
@@ -123,10 +128,17 @@ export function ImportDialog({ initialFile, scene, onClose, onImport }: Props) {
       const data = new FormData();
       data.append("file", file);
       if (worksheet) data.append("worksheet", worksheet);
-      const found = await api<Inspection | WorkbookChoice>("/imports/inspect", {
-        method: "POST",
-        body: data,
-      });
+      const found = await api<Inspection | WorkbookChoice | SpkInspection>(
+        "/imports/inspect",
+        {
+          method: "POST",
+          body: data,
+        },
+      );
+      if ("source_format" in found && found.source_format === "bsp") {
+        setSpk(found);
+        return;
+      }
       if ("requires_worksheet" in found) {
         setWorksheets(found.worksheets);
         setWorksheet(found.worksheets[0] || "");
@@ -324,6 +336,19 @@ export function ImportDialog({ initialFile, scene, onClose, onImport }: Props) {
     setDecisions((d) => ({ ...d, ...patch }));
     setReport(null);
   }
+  if (spk)
+    return (
+      <SpkImportDialog
+        info={spk}
+        scene={scene}
+        onClose={() => {
+          resetInspection();
+          onClose();
+        }}
+        onBack={resetInspection}
+        onImport={onImport}
+      />
+    );
   return (
     <div className="modal-backdrop">
       <section
@@ -346,18 +371,19 @@ export function ImportDialog({ initialFile, scene, onClose, onImport }: Props) {
             {!inspection ? (
               <>
                 <p className="muted">
-                  CSV / XLSX 六根数或位置与速度 · 导入结果最多 100,000 条 / 20
-                  MiB。 超限可选择时间段或降低时间分辨率；源文件最多 200
-                  MiB、100 万条。CSV 使用 UTF-8。
+                  CSV / XLSX 六根数或位置与速度，或 JPL HORIZONS .bsp
+                  小天体星历。表格导入结果最多 100,000 条 / 20 MiB。
+                  超限可选择时间段或降低时间分辨率；源文件最多 200 MiB、100
+                  万条。CSV 使用 UTF-8。
                 </p>
                 <label className="file-drop">
                   <Upload size={30} />
                   <strong>{file?.name || "选择星历文件"}</strong>
-                  <span>支持样例表头或规范字段名</span>
+                  <span>CSV / XLSX 表格或 SPK 二进制星历</span>
                   <input
-                    aria-label="选择CSV或XLSX"
+                    aria-label="选择CSV、XLSX或BSP"
                     type="file"
-                    accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    accept=".csv,.xlsx,.bsp,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     disabled={busy}
                     onChange={(e) => {
                       resetInspection();

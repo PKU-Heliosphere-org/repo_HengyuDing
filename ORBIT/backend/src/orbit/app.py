@@ -13,7 +13,7 @@ import erfa
 from datetime import datetime, timezone
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
@@ -23,7 +23,7 @@ from .mechanics import conic
 from .models import CENTERS, ImportRequest, ImportSelection, PreviewRequest, StrictModel
 from .table_reader import MAX_SOURCE_BYTES
 from .reduction_tasks import ReductionTask, ACTIVE
-from . import planets
+from . import planets, spk_import
 from .video_exports import router as video_router
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -67,7 +67,7 @@ def add_import(raw, filename, worksheet=None):
             imports.pop(key, None)
     if len(imports) >= 16:
         raise ImportProblem("待处理导入过多，请完成或取消已有导入", "capacity", status=409)
-    parsed = read_table(raw, filename, worksheet, discover=True, allow_reduction=True)
+    parsed = spk_import.inspect(raw) if Path(filename).suffix.lower() == '.bsp' else read_table(raw, filename, worksheet, discover=True, allow_reduction=True)
     if parsed.get('requires_worksheet'):
         return {**parsed, 'filename':filename}
     key = str(uuid.uuid4())
@@ -78,6 +78,8 @@ def add_import(raw, filename, worksheet=None):
 def import_inspection(key):
     entry = get_entry(imports, key)
     parsed = entry['parsed']
+    if parsed.get('source_format') == 'bsp':
+        return {**parsed, 'id':key, 'filename':entry['filename']}
     return {"id": key, "filename": entry['filename'], "headers": parsed["headers"], "mapping": parsed["mapping"],
             'input_types':input_types(parsed['mapping']),
             "input_rows": len(parsed["rows"]), "preview": parsed["rows"][:5], "sha256": parsed["sha256"],
@@ -111,23 +113,37 @@ def presets():
     return {"centers": CENTERS, "frames": ["J2000", "ECLIPJ2000"], "reference_epoch": "J2000.0 (JD 2451545.0 TT)", "leap_seconds": leaps}
 
 
-@app.get("/api/v1/examples/sample")
-def sample():
-    path = next((ROOT / "codex" / "examples").glob("*.csv"), None)
-    if path is None:
-        raise ImportProblem("未找到样例 CSV", "not_found", status=404)
-    return FileResponse(path, media_type="text/csv", filename=path.name)
-
-
 @app.post("/api/v1/imports/inspect")
 async def inspect(file: UploadFile = File(...), worksheet: str | None = Form(None)):
     raw = await file.read(MAX_SOURCE_BYTES+1)
     return await run_in_threadpool(add_import, raw, Path(file.filename or "orbit.csv").name, worksheet)
 
 
+@app.post('/api/v1/imports/{key}/spk/commit')
+def commit_spk(key: str, body: spk_import.SpkRequest):
+    if len(datasets) >= 64:
+        raise ImportProblem('数据集数量已达本次会话上限', 'capacity', status=409)
+    entry = get_entry(imports, key)
+    if entry['parsed'].get('source_format') != 'bsp':
+        raise ImportProblem('请先读取 SPK 文件', 'invalid_request')
+    with entry['task_lock']:
+        ds = spk_import.build_dataset(entry['raw'], body)
+        ds.update(id=str(uuid.uuid4()), filename=entry['filename'], source_base64=base64.b64encode(entry['raw']).decode('ascii'))
+        datasets[ds['id']] = ds
+        imports.pop(key, None)
+        return public_dataset(ds)
+
+
+def table_entry(key):
+    entry = get_entry(imports, key)
+    if entry['parsed'].get('source_format') == 'bsp':
+        raise ImportProblem('SPK 请使用专用采样导入流程', 'invalid_request')
+    return entry
+
+
 @app.post('/api/v1/imports/{key}/reduce')
 def reduce_import(key: str, body: ImportSelection):
-    entry = get_entry(imports, key)
+    entry = table_entry(key)
     with entry['task_lock']:
         if reduction_active(entry):
             raise ImportProblem('正在处理，请等待完成或先取消处理', 'reduction_busy', status=409)
@@ -144,7 +160,7 @@ def reduction_active(entry):
 
 @app.post('/api/v1/imports/{key}/reduction-jobs', status_code=202)
 def start_reduction(key: str, body: ImportSelection):
-    entry = get_entry(imports, key)
+    entry = table_entry(key)
     with entry['task_lock']:
         if reduction_active(entry):
             raise ImportProblem('正在处理，请等待完成或先取消处理', 'reduction_busy', status=409)
@@ -192,7 +208,7 @@ def cancel_import(key: str):
 
 @app.post("/api/v1/imports/{key}/validate")
 def validate_import(key: str, body: ImportRequest):
-    entry = get_entry(imports, key)
+    entry = table_entry(key)
     if reduction_active(entry):
         raise ImportProblem('正在处理，请等待完成或先取消处理', 'reduction_busy', status=409)
     return validate(entry["parsed"], body)[0]
@@ -202,7 +218,7 @@ def validate_import(key: str, body: ImportRequest):
 def commit_import(key: str, body: ImportRequest):
     if len(datasets) >= 64:
         raise ImportProblem("数据集数量已达本次会话上限，请保存项目后重启", "capacity", status=409)
-    entry = get_entry(imports, key)
+    entry = table_entry(key)
     if reduction_active(entry):
         raise ImportProblem('正在处理，请等待完成或先取消处理', 'reduction_busy', status=409)
     report, ds = validate(entry["parsed"], body)
@@ -415,13 +431,20 @@ async def import_project(file: UploadFile = File(...)):
             source = base64.b64decode(item["source_base64"], validate=True)
             if hashlib.sha256(source).hexdigest() != item["source_sha256"]:
                 raise ImportProblem("项目源文件校验失败")
-            req = ImportRequest.model_validate(item["import_request"])
-            parsed = await run_in_threadpool(read_table, source, str(item['filename']), item.get('worksheet'), selection=req.selection)
-            if item.get('source_format', parsed['source_format']) != parsed['source_format']:
-                raise ImportProblem("项目源文件格式与文件名不一致")
-            report, ds = validate(parsed, req)
-            if not report["ok"]:
-                raise ImportProblem("项目数据未通过重新校验", details=report["issues"])
+            if item.get('source_format') == 'bsp':
+                if Path(str(item['filename'])).suffix.lower() != '.bsp':
+                    raise ImportProblem('项目 SPK 格式与文件名不一致')
+                req = spk_import.SpkRequest.model_validate(item['import_request']['spk'])
+                ds = await run_in_threadpool(spk_import.build_dataset, source, req)
+                parsed = {'source_format':'bsp', 'worksheet':None}
+            else:
+                req = ImportRequest.model_validate(item["import_request"])
+                parsed = await run_in_threadpool(read_table, source, str(item['filename']), item.get('worksheet'), selection=req.selection)
+                if item.get('source_format', parsed['source_format']) != parsed['source_format']:
+                    raise ImportProblem("项目源文件格式与文件名不一致")
+                report, ds = validate(parsed, req)
+                if not report["ok"]:
+                    raise ImportProblem("项目数据未通过重新校验", details=report["issues"])
             ds.update({"id": item["id"], "filename": str(item["filename"]), "source_base64": item["source_base64"]})
             ds.update(source_format=parsed['source_format'], worksheet=parsed['worksheet'])
             rebuilt[ds["id"]] = ds

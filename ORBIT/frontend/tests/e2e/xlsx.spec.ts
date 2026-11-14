@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 
 test("xlsx worksheet selection, row conflicts and portable project", async ({
   page,
@@ -9,9 +10,20 @@ test("xlsx worksheet selection, row conflicts and portable project", async ({
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("/");
   await page.getByRole("button", { name: "导入数据", exact: true }).click();
-  await page
-    .getByLabel("选择CSV或XLSX")
-    .setInputFiles(path.resolve("tests/fixtures/ephemeris.xlsx"));
+  await page.getByLabel("选择CSV、XLSX或BSP").setInputFiles({
+    name: "ephemeris.xlsx",
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    buffer: execFileSync(
+      path.resolve(
+        process.platform === "win32"
+          ? "../.venv/Scripts/python.exe"
+          : "../.venv/bin/python",
+      ),
+      [path.resolve("tests/fixtures/make_ephemeris.py")],
+      { windowsHide: true },
+    ),
+  });
   await page.getByRole("button", { name: "读取文件", exact: true }).click();
   await expect(page.getByLabel("XLSX工作表")).toBeVisible();
   await page.getByLabel("XLSX工作表").selectOption("轨道数据");
@@ -41,7 +53,7 @@ test("xlsx worksheet selection, row conflicts and portable project", async ({
     .not.toBe("2026-01-01 00:00:00");
   await page.getByRole("button", { name: "暂停", exact: true }).click();
   const glow = page.getByLabel("对象光点大小");
-  await expect(glow).toHaveValue("24");
+  await expect(glow).toHaveValue("6");
   await page.getByRole("checkbox", { name: "轨道", exact: true }).uncheck();
   await page.getByRole("checkbox", { name: "尾迹", exact: true }).uncheck();
   const glowPixels = async () => {
@@ -102,7 +114,7 @@ test("broken workbook error can be corrected by choosing a CSV", async ({
 }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "导入数据", exact: true }).click();
-  await page.getByLabel("选择CSV或XLSX").setInputFiles({
+  await page.getByLabel("选择CSV、XLSX或BSP").setInputFiles({
     name: "broken.xlsx",
     mimeType:
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -110,7 +122,7 @@ test("broken workbook error can be corrected by choosing a CSV", async ({
   });
   await page.getByRole("button", { name: "读取文件", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("无法读取 XLSX");
-  await page.getByLabel("选择CSV或XLSX").setInputFiles({
+  await page.getByLabel("选择CSV、XLSX或BSP").setInputFiles({
     name: "valid.csv",
     mimeType: "text/csv",
     buffer: Buffer.from(
@@ -122,5 +134,5 @@ test("broken workbook error can be corrected by choosing a CSV", async ({
   await expect(page.getByText("预检结果 · 可导入")).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
   await page.getByRole("button", { name: "添加到场景", exact: true }).click();
-  await expect(page.getByLabel("对象光点大小")).toHaveValue("24");
+  await expect(page.getByLabel("对象光点大小")).toHaveValue("6");
 });
